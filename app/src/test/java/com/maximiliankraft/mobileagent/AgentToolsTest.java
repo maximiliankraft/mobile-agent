@@ -110,18 +110,24 @@ public class AgentToolsTest {
         Files.write(requested.toPath(), "BEGIN:VCARD".getBytes(StandardCharsets.UTF_8));
 
         assertEquals(requested.getCanonicalFile(),
-                AgentTools.resolveReadableFile(storageRoot, workspace, "contact.vcf"));
+                AgentTools.resolveReadableFile(workspace, "contact.vcf"));
         try {
-            AgentTools.resolveReadableFile(storageRoot, workspace, "missing.vcf");
+            AgentTools.resolveReadableFile(workspace, "missing.vcf");
             fail("Expected a nonexistent file to be rejected.");
         } catch (IOException expected) {
             assertTrue(expected.getMessage().contains("readable file"));
         }
         try {
-            AgentTools.resolveReadableFile(storageRoot, workspace, "");
+            AgentTools.resolveReadableFile(workspace, "");
             fail("Expected a directory to be rejected.");
         } catch (IOException expected) {
             assertTrue(expected.getMessage().contains("readable file"));
+        }
+        try {
+            AgentTools.resolveReadableFile(workspace, requested.getAbsolutePath());
+            fail("Expected an absolute path to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("relative workspace path"));
         }
     }
 

@@ -4,6 +4,7 @@ import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.util.Base64;
 
@@ -15,9 +16,12 @@ import java.nio.charset.StandardCharsets;
 public final class WorkspaceFileProvider extends ContentProvider {
     private static final String FILE_PATH = "file";
 
-    static Uri uriForFile(String authority, File file) throws IOException {
+    static Uri uriForFile(String authority, File workspaceDirectory, File file) throws IOException {
+        File workspace = workspaceDirectory.getCanonicalFile();
         File canonicalFile = file.getCanonicalFile();
-        if (!canonicalFile.isFile() || !canonicalFile.canRead()) {
+        if (!canonicalFile.toPath().startsWith(workspace.toPath())
+                || canonicalFile.equals(workspace)
+                || !canonicalFile.isFile() || !canonicalFile.canRead()) {
             throw new IOException("Path is not a readable file: " + canonicalFile.getPath());
         }
         String encodedPath = Base64.encodeToString(canonicalFile.getPath()
@@ -63,7 +67,10 @@ public final class WorkspaceFileProvider extends ContentProvider {
                     Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
             File requested = new File(new String(decodedPath, StandardCharsets.UTF_8));
             File canonicalFile = requested.getCanonicalFile();
+            File workspace = AgentTools.workspaceDirectory(Environment.getExternalStorageDirectory());
             if (!requested.isAbsolute() || !canonicalFile.equals(requested)
+                    || !canonicalFile.toPath().startsWith(workspace.toPath())
+                    || canonicalFile.equals(workspace)
                     || !canonicalFile.isFile() || !canonicalFile.canRead()) {
                 throw new FileNotFoundException("Path is not a readable file.");
             }

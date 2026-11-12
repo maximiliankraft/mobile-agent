@@ -102,9 +102,8 @@ final class AgentTools {
         return target;
     }
 
-    static File resolveReadableFile(File sharedStorageRoot, File workspaceDirectory, String path)
-            throws IOException {
-        File target = resolvePath(sharedStorageRoot, workspaceDirectory, path);
+    static File resolveReadableFile(File workspaceDirectory, String path) throws IOException {
+        File target = workspaceFile(workspaceDirectory, path);
         if (!target.isFile() || !target.canRead()) {
             throw new IOException("Path is not a readable file: " + target.getPath());
         }

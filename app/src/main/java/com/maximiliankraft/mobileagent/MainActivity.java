@@ -1467,11 +1467,11 @@ public class MainActivity extends Activity {
                     return "File open rejected: it contains an unsupported field.";
                 }
             }
-            File root = sharedStorageRoot();
             String path = arguments.getString("path");
-            File workspace = AgentTools.workspaceForPath(root, path);
-            File file = AgentTools.resolveReadableFile(root, workspace, path);
-            Uri uri = WorkspaceFileProvider.uriForFile(getPackageName() + ".workspace-files", file);
+            File workspace = workspaceDirectory();
+            File file = AgentTools.resolveReadableFile(workspace, path);
+            Uri uri = WorkspaceFileProvider.uriForFile(
+                    getPackageName() + ".workspace-files", workspace, file);
             String mimeType = AgentTools.mimeTypeForFileName(file.getName());
             Intent intent = new Intent(Intent.ACTION_VIEW)
                     .setDataAndType(uri, mimeType)
@@ -1531,8 +1531,8 @@ public class MainActivity extends Activity {
                         .put("start", stringSchema("Start timestamp in ISO-8601 UTC format."))
                         .put("end", stringSchema("End timestamp in ISO-8601 UTC format.")),
                 new JSONArray().put("title").put("start").put("end")));
-        tools.put(tool("open_file", "Open a readable workspace file in its default Android app after user approval. The app receives read-only access.",
-                new JSONObject().put("path", stringSchema("Workspace-relative path, or an absolute path Android permits.")),
+        tools.put(tool("open_file", "Open a readable file from the agent workspace in its default Android app after user approval. The app receives read-only access.",
+                new JSONObject().put("path", stringSchema("Relative file path inside the agent workspace.")),
                 new JSONArray().put("path")));
         JSONObject intentProperties = new JSONObject()
                 .put("action", stringSchema("Android intent action, for example android.intent.action.VIEW."))

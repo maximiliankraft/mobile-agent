@@ -2,11 +2,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
+        android:name=".MobileAgentApplication"
         android:allowBackup="false"
         android:label="Mobile Agent"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
             android:name=".MainActivity"
+            android:windowSoftInputMode="adjustResize"
+            android:exported="false" />
+        <activity
+            android:name=".SettingsActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

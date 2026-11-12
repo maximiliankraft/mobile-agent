@@ -1,15 +1,18 @@
 package com.maximiliankraft.mobileagent;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.provider.CalendarContract;
-import android.text.InputType;
+import android.provider.ContactsContract;
+import android.net.Uri;
+import android.util.Base64;
+import android.view.inputmethod.EditorInfo;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -24,6 +27,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -32,6 +36,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -46,28 +51,40 @@ public class MainActivity extends Activity {
     private static final String MODEL = "deepseek-chat";
     private static final int MAX_API_TURNS = 8;
     private static final int MAX_TOOL_CALLS_PER_RESPONSE = 4;
+    private static final int PICK_IMAGE = 1;
+    private static final int PICK_FILE = 2;
+    private static final int PICK_CONTACT = 3;
+    private static final int EDIT_API_KEY = 4;
+    private static final int MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+    private static final int MAX_TEXT_FILE_BYTES = 32 * 1024;
     private static final ExecutorService IO_EXECUTOR = Executors.newSingleThreadExecutor();
 
     private final List<JSONObject> conversation = new ArrayList<>();
     private LinearLayout messages;
     private EditText messageInput;
-    private EditText apiKeyInput;
     private ScrollView messageScroll;
     private Button sendButton;
     private String apiKey;
+    private String pendingImageDataUrl;
+    private String pendingContext = "";
     private boolean busy;
     private int apiTurnsRemaining;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        apiKey = ((MobileAgentApplication) getApplication()).getApiKey();
+        if (apiKey == null || apiKey.isEmpty()) {
+            startActivity(new Intent(this, SettingsActivity.class));
+            finish();
+            return;
+        }
         conversation.add(systemMessage());
         setContentView(createContent());
     }
 
     @Override
     protected void onDestroy() {
-        apiKey = null;
         super.onDestroy();
     }
 
@@ -77,35 +94,22 @@ public class MainActivity extends Activity {
         page.setPadding(dp(20), dp(20), dp(20), dp(16));
         page.setBackgroundColor(PAGE_BACKGROUND);
 
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
         TextView heading = text("Mobile Agent", 26, INK, true);
-        page.addView(heading);
+        titleRow.addView(heading, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button settingsButton = new Button(this);
+        settingsButton.setText("API key");
+        settingsButton.setAllCaps(false);
+        titleRow.addView(settingsButton);
+        settingsButton.setOnClickListener(view ->
+                startActivityForResult(new Intent(this, SettingsActivity.class)
+                        .putExtra("return_to_chat", true), EDIT_API_KEY));
+        page.addView(titleRow);
         TextView subtitle = text("DeepSeek · actions always need your approval", 14, MUTED, false);
         subtitle.setPadding(0, dp(4), 0, dp(12));
         page.addView(subtitle);
-
-        LinearLayout credentials = new LinearLayout(this);
-        credentials.setOrientation(LinearLayout.HORIZONTAL);
-        apiKeyInput = new EditText(this);
-        apiKeyInput.setSingleLine(true);
-        apiKeyInput.setHint("DeepSeek API key (memory only)");
-        apiKeyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        credentials.addView(apiKeyInput, new LinearLayout.LayoutParams(0, dp(52), 1));
-        Button useKeyButton = new Button(this);
-        useKeyButton.setText("Use key");
-        useKeyButton.setAllCaps(false);
-        credentials.addView(useKeyButton, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(52)));
-        page.addView(credentials);
-        useKeyButton.setOnClickListener(view -> {
-            String enteredKey = apiKeyInput.getText().toString().trim();
-            if (enteredKey.isEmpty()) {
-                showToast("Enter your DeepSeek API key first.");
-                return;
-            }
-            apiKey = enteredKey;
-            apiKeyInput.setText("");
-            showToast("API key held in memory until the app closes.");
-        });
 
         messageScroll = new ScrollView(this);
         messageScroll.setFillViewport(true);
@@ -121,12 +125,23 @@ public class MainActivity extends Activity {
         addMessage("assistant",
                 "Add your DeepSeek API key, then ask me to create a file, run a safe read-only command, or draft a calendar event. I will show the exact action and ask before doing it.");
 
+        LinearLayout attachmentActions = new LinearLayout(this);
+        attachmentActions.setGravity(Gravity.CENTER_VERTICAL);
+        Button imageButton = attachmentButton("Image", () -> chooseContent(PICK_IMAGE));
+        Button fileButton = attachmentButton("File", () -> chooseContent(PICK_FILE));
+        Button contactButton = attachmentButton("Contact", this::chooseContact);
+        attachmentActions.addView(imageButton);
+        attachmentActions.addView(fileButton);
+        attachmentActions.addView(contactButton);
+        page.addView(attachmentActions);
+
         LinearLayout composer = new LinearLayout(this);
         composer.setGravity(Gravity.CENTER_VERTICAL);
         messageInput = new EditText(this);
         messageInput.setHint("Ask Mobile Agent…");
         messageInput.setMinLines(1);
         messageInput.setMaxLines(4);
+        messageInput.setImeOptions(EditorInfo.IME_ACTION_SEND);
         composer.addView(messageInput, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         sendButton = new Button(this);
@@ -143,17 +158,157 @@ public class MainActivity extends Activity {
         if (content.isEmpty() || busy) {
             return;
         }
-        if (apiKey == null || apiKey.isEmpty()) {
-            showToast("Add your DeepSeek API key first.");
-            return;
+        if (!pendingContext.isEmpty()) {
+            content += "\n\nSelected context:\n" + pendingContext;
         }
         messageInput.setText("");
-        conversation.add(message("user", content));
+        JSONObject userMessage = message("user", content);
+        if (pendingImageDataUrl != null) {
+            try {
+                JSONArray contentParts = new JSONArray()
+                        .put(new JSONObject().put("type", "text").put("text", content))
+                        .put(new JSONObject().put("type", "image_url")
+                                .put("image_url", new JSONObject().put("url", pendingImageDataUrl)));
+                userMessage.put("content", contentParts);
+            } catch (JSONException exception) {
+                showToast("Could not attach the selected image.");
+                return;
+            }
+        }
+        conversation.add(userMessage);
         addMessage("user", content);
+        if (pendingImageDataUrl != null) {
+            addMessage("user", "Image attached.");
+        }
+        pendingImageDataUrl = null;
+        pendingContext = "";
         busy = true;
         apiTurnsRemaining = MAX_API_TURNS;
         setComposerEnabled(false);
         requestAssistantResponse();
+    }
+
+    private Button attachmentButton(String label, Runnable action) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setAllCaps(false);
+        button.setOnClickListener(view -> action.run());
+        return button;
+    }
+
+    private void chooseContent(int requestCode) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(requestCode == PICK_IMAGE ? "image/*" : "text/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, requestCode);
+        } catch (ActivityNotFoundException exception) {
+            showToast("No file picker is available.");
+        }
+    }
+
+    private void chooseContact() {
+        Intent intent = new Intent(Intent.ACTION_PICK, ContactsContract.Contacts.CONTENT_URI);
+        try {
+            startActivityForResult(intent, PICK_CONTACT);
+        } catch (ActivityNotFoundException exception) {
+            showToast("No contacts app is available.");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == EDIT_API_KEY) {
+            apiKey = ((MobileAgentApplication) getApplication()).getApiKey();
+            return;
+        }
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        Uri uri = data.getData();
+        try {
+            if (requestCode == PICK_IMAGE) {
+                String mimeType = getContentResolver().getType(uri);
+                if (mimeType == null || !mimeType.startsWith("image/")) {
+                    showToast("The selected file is not an image.");
+                    return;
+                }
+                byte[] imageBytes = readUriBytes(uri, MAX_ATTACHMENT_BYTES);
+                pendingImageDataUrl = "data:" + mimeType + ";base64,"
+                        + Base64.encodeToString(imageBytes, Base64.NO_WRAP);
+                showToast("Image attached. Add a prompt and send it.");
+            } else if (requestCode == PICK_FILE) {
+                String fileText = new String(readUriBytes(uri, MAX_TEXT_FILE_BYTES),
+                        StandardCharsets.UTF_8);
+                pendingContext += "\nSelected text file (" + uri.getLastPathSegment()
+                        + "):\n" + fileText;
+                showToast("File attached to the next prompt.");
+            } else if (requestCode == PICK_CONTACT) {
+                pendingContext += "\nSelected contact:\n" + readContact(uri);
+                showToast("Contact added to the next prompt.");
+            }
+        } catch (Exception exception) {
+            showToast("Could not read the selection: " + safeError(exception.getMessage()));
+        }
+    }
+
+    private byte[] readUriBytes(Uri uri, int maximumBytes) throws IOException {
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) {
+                throw new IOException("File could not be opened.");
+            }
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                if (output.size() + count > maximumBytes) {
+                    throw new IOException("Selection exceeds the size limit.");
+                }
+                output.write(buffer, 0, count);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private String readContact(Uri uri) {
+        StringBuilder result = new StringBuilder();
+        String contactId = null;
+        try (Cursor cursor = getContentResolver().query(uri,
+                new String[]{ContactsContract.Contacts._ID,
+                        ContactsContract.Contacts.DISPLAY_NAME,
+                        ContactsContract.Contacts.HAS_PHONE_NUMBER},
+                null, null, null)) {
+            if (cursor == null || !cursor.moveToFirst()) {
+                return "No contact details were available.";
+            }
+            contactId = cursor.getString(0);
+            result.append("Name: ").append(cursor.getString(1));
+            if (cursor.getInt(2) != 0) {
+                try (Cursor phones = getContentResolver().query(
+                        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                        new String[]{ContactsContract.CommonDataKinds.Phone.NUMBER},
+                        ContactsContract.CommonDataKinds.Phone.CONTACT_ID + " = ?",
+                        new String[]{contactId}, null)) {
+                    if (phones != null && phones.moveToFirst()) {
+                        result.append("\nPhone: ").append(phones.getString(0));
+                    }
+                }
+            }
+        }
+        if (contactId != null) {
+            try (Cursor emails = getContentResolver().query(
+                    ContactsContract.CommonDataKinds.Email.CONTENT_URI,
+                    new String[]{ContactsContract.CommonDataKinds.Email.ADDRESS},
+                    ContactsContract.CommonDataKinds.Email.CONTACT_ID + " = ?",
+                    new String[]{contactId}, null)) {
+                if (emails != null && emails.moveToFirst()) {
+                    result.append("\nEmail: ").append(emails.getString(0));
+                }
+            }
+        }
+        return result.toString();
     }
 
     private void requestAssistantResponse() {
@@ -163,6 +318,7 @@ public class MainActivity extends Activity {
         }
         IO_EXECUTOR.execute(() -> {
             try {
+                conversation.get(0).put("content", systemPrompt());
                 JSONObject request = new JSONObject()
                         .put("model", MODEL)
                         .put("messages", new JSONArray(conversation))
@@ -257,6 +413,11 @@ public class MainActivity extends Activity {
             return;
         }
 
+        if ("get_current_datetime".equals(name)) {
+            appendToolResult(callId, ZonedDateTime.now().toString());
+            processToolCall(assistantMessage, calls, index + 1);
+            return;
+        }
         if (!isSupportedTool(name)) {
             appendToolResult(callId, "Unsupported tool; no action was taken.");
             processToolCall(assistantMessage, calls, index + 1);
@@ -314,17 +475,49 @@ public class MainActivity extends Activity {
                             + "\n\nYour calendar app will let you review it before saving.";
                     break;
             }
-            ScrollView detailScroller = new ScrollView(this);
+            LinearLayout approvalBubble = new LinearLayout(this);
+            approvalBubble.setOrientation(LinearLayout.VERTICAL);
+            approvalBubble.setPadding(dp(12), dp(10), dp(12), dp(10));
+            approvalBubble.setBackground(cardBackground(Color.rgb(255, 246, 222), dp(12)));
+            TextView titleText = text(title, 16, INK, true);
+            approvalBubble.addView(titleText);
             TextView detailText = text(details, 15, INK, false);
             detailText.setTextIsSelectable(true);
+            ScrollView detailScroller = new ScrollView(this);
             detailScroller.addView(detailText);
-            new AlertDialog.Builder(this)
-                    .setTitle(title)
-                    .setView(detailScroller)
-                    .setNegativeButton("Cancel", (dialog, which) -> callback.onResult(false))
-                    .setPositiveButton("Approve", (dialog, which) -> callback.onResult(true))
-                    .setOnCancelListener(dialog -> callback.onResult(false))
-                    .show();
+            LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            detailParams.topMargin = dp(8);
+            approvalBubble.addView(detailScroller, detailParams);
+            LinearLayout actions = new LinearLayout(this);
+            actions.setGravity(Gravity.END);
+            Button denyButton = new Button(this);
+            denyButton.setText("Deny");
+            denyButton.setAllCaps(false);
+            Button allowButton = new Button(this);
+            allowButton.setText("Allow");
+            allowButton.setAllCaps(false);
+            actions.addView(denyButton);
+            actions.addView(allowButton);
+            LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            actionsParams.topMargin = dp(6);
+            approvalBubble.addView(actions, actionsParams);
+            LinearLayout.LayoutParams bubbleParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            bubbleParams.setMargins(0, 0, 0, dp(10));
+            messages.addView(approvalBubble, bubbleParams);
+            messageScroll.post(() -> messageScroll.fullScroll(ScrollView.FOCUS_DOWN));
+            denyButton.setOnClickListener(view -> {
+                denyButton.setEnabled(false);
+                allowButton.setEnabled(false);
+                callback.onResult(false);
+            });
+            allowButton.setOnClickListener(view -> {
+                denyButton.setEnabled(false);
+                allowButton.setEnabled(false);
+                callback.onResult(true);
+            });
         } catch (JSONException exception) {
             callback.onResult(false);
         }
@@ -377,6 +570,8 @@ public class MainActivity extends Activity {
 
     private JSONArray toolDefinitions() throws JSONException {
         JSONArray tools = new JSONArray();
+        tools.put(tool("get_current_datetime", "Get the current local date, time, and timezone.",
+                new JSONObject(), new JSONArray()));
         tools.put(tool("create_file", "Create or replace a small text file in the private workspace.",
                 new JSONObject()
                         .put("path", stringSchema("Relative workspace path, for example notes/todo.txt."))
@@ -419,10 +614,15 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject systemMessage() {
-        return message("system", "You are Mobile Agent, an Android assistant. Use only the provided tools "
+        return message("system", systemPrompt());
+    }
+
+    private String systemPrompt() {
+        return "You are Mobile Agent, an Android assistant. The current local date and time is "
+                + ZonedDateTime.now() + ". Use this for relative dates and times, and use only the provided tools "
                 + "when an action is needed. Never claim an action happened before the tool result. "
                 + "All actions require explicit user approval; the app enforces this. Commands are "
-                + "limited to pwd, ls, cat, and wc in the app-private workspace, not a general shell.");
+                + "limited to pwd, ls, cat, and wc in the app-private workspace, not a general shell.";
     }
 
     private void appendToolResult(String callId, String content) {
@@ -474,7 +674,7 @@ public class MainActivity extends Activity {
 
     private boolean isSupportedTool(String name) {
         return "create_file".equals(name) || "run_command".equals(name)
-                || "open_calendar".equals(name);
+                || "open_calendar".equals(name) || "get_current_datetime".equals(name);
     }
 
     private String safeError(String value) {

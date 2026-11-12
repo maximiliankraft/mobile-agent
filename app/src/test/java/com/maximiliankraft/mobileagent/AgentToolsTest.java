@@ -23,14 +23,16 @@ public class AgentToolsTest {
     public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     private File filesDirectory;
+    private File storageRoot;
     private File workspace;
     private File cacheDirectory;
 
     @Before
     public void setUp() throws Exception {
         filesDirectory = temporaryFolder.newFolder("app-files");
+        storageRoot = temporaryFolder.newFolder("shared-storage");
         cacheDirectory = temporaryFolder.newFolder("cache");
-        workspace = AgentTools.workspaceDirectory(filesDirectory);
+        workspace = AgentTools.workspaceDirectory(storageRoot);
     }
 
     @Test
@@ -40,6 +42,156 @@ public class AgentToolsTest {
         assertTrue(result.startsWith("Created notes/todo.txt"));
         assertEquals("café", new String(Files.readAllBytes(
                 new File(workspace, "notes/todo.txt").toPath()), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    public void defaultWorkspaceLivesInVisibleSharedStorage() throws Exception {
+        assertEquals(new File(storageRoot, "mobileagent").getCanonicalFile(), workspace);
+    }
+
+    @Test
+    public void rejectsWorkspaceSymlinksThatEscapeSharedStorage() throws Exception {
+        File linkRoot = temporaryFolder.newFolder("linked-storage");
+        File externalTarget = temporaryFolder.newFolder("external-target");
+        Files.createSymbolicLink(new File(linkRoot, "mobileagent").toPath(),
+                externalTarget.toPath());
+
+        try {
+            AgentTools.workspaceDirectory(linkRoot);
+            fail("Expected a workspace symlink outside shared storage to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("workspace"));
+        }
+    }
+
+    @Test
+    public void resolvesOmittedAndAbsolutePathsWithinSharedStorage() throws Exception {
+        assertEquals(workspace.getCanonicalFile(),
+                AgentTools.resolvePath(storageRoot, workspace, "").getCanonicalFile());
+        File requested = new File(storageRoot, "Documents/notes.txt");
+        assertEquals(requested.getCanonicalFile(),
+                AgentTools.resolvePath(storageRoot, workspace, requested.getPath()).getCanonicalFile());
+    }
+
+    @Test
+    public void readsWritesListsAndCreatesDirectoriesWithinSharedStorage() throws Exception {
+        String path = "notes/todo.txt";
+        assertTrue(AgentTools.writeTextFile(storageRoot, workspace, path, "café")
+                .contains("Written"));
+        assertEquals("café", AgentTools.readTextFile(storageRoot, workspace, path));
+        assertTrue(AgentTools.listDirectory(storageRoot, workspace, "notes").contains("todo.txt"));
+        assertTrue(AgentTools.createDirectory(storageRoot, workspace, "skills/example")
+                .contains("Created directory"));
+        assertTrue(new File(workspace, "skills/example").isDirectory());
+    }
+
+    @Test
+    public void rejectsRelativePathsOutsideWorkspace() throws Exception {
+        try {
+            AgentTools.resolvePath(storageRoot, workspace, "../escape.txt");
+            fail("Expected a relative path outside the workspace to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("workspace"));
+        }
+    }
+
+    @Test
+    public void allowsExplicitAbsolutePathsOutsideSharedStorage() throws Exception {
+        File requested = temporaryFolder.newFile("approved-device-file.txt");
+
+        File resolved = AgentTools.resolvePath(storageRoot, workspace, requested.getPath());
+
+        assertEquals(requested.getCanonicalFile(), resolved);
+    }
+
+    @Test
+    public void absoluteDevicePathsDoNotRequireCreatingTheDefaultWorkspace() throws Exception {
+        File requested = temporaryFolder.newFile("device-file-without-workspace.txt");
+        File rootWithoutWorkspace = temporaryFolder.newFolder("storage-without-workspace");
+
+        File selectedWorkspace = AgentTools.workspaceForPath(rootWithoutWorkspace,
+                requested.getPath());
+
+        assertFalse(selectedWorkspace.exists());
+        assertEquals(requested.getCanonicalFile(), AgentTools.resolvePath(rootWithoutWorkspace,
+                selectedWorkspace, requested.getPath()));
+    }
+
+    @Test
+    public void absoluteDevicePathsDoNotDependOnAWorkspaceSymlink() throws Exception {
+        File linkedStorageRoot = temporaryFolder.newFolder("storage-with-linked-workspace");
+        File redirectedWorkspace = temporaryFolder.newFolder("redirected-workspace");
+        File requested = temporaryFolder.newFile("device-file-outside-linked-workspace.txt");
+        Files.createSymbolicLink(new File(linkedStorageRoot, "mobileagent").toPath(),
+                redirectedWorkspace.toPath());
+
+        File selectedWorkspace = AgentTools.workspaceForPath(linkedStorageRoot,
+                requested.getPath());
+
+        assertEquals(requested.getCanonicalFile(), AgentTools.resolvePath(linkedStorageRoot,
+                selectedWorkspace, requested.getPath()));
+    }
+
+    @Test
+    public void systemPromptGuidesTheAgentToReadNotesAndSkillsOnDemand() {
+        String instruction = AgentTools.agentFilesPromptInstruction();
+
+        assertTrue(instruction.contains("user.md"));
+        assertTrue(instruction.contains("soul.md"));
+        assertTrue(instruction.contains("skills/"));
+        assertTrue(instruction.contains("read_file"));
+        assertTrue(instruction.contains("not loaded automatically"));
+    }
+
+    @Test
+    public void contactSearchToolOutputDoesNotExposeLocallyDisplayedDetails() {
+        String localResults = "Contact matches (2):\nName: Alice Example\nPhone: 555-0101"
+                + "\nName: Bob Example\nPhone: 555-0102";
+
+        String toolOutput = AgentTools.contactSearchToolResult(localResults);
+
+        assertTrue(toolOutput.contains("2"));
+        assertTrue(toolOutput.contains("not sent to DeepSeek"));
+        assertFalse(toolOutput.contains("Alice Example"));
+        assertFalse(toolOutput.contains("555-0101"));
+        assertFalse(toolOutput.contains("Bob Example"));
+        assertFalse(toolOutput.contains("555-0102"));
+    }
+
+    @Test
+    public void failedOversizeReplacementLeavesExistingFileUnchanged() throws Exception {
+        AgentTools.writeTextFile(storageRoot, workspace, "keep.txt", "original");
+
+        String result = AgentTools.writeTextFile(storageRoot, workspace, "keep.txt",
+                repeat('x', AgentTools.MAX_FILE_BYTES + 1));
+
+        assertTrue(result.contains("exceeds 16 KiB"));
+        assertEquals("original", AgentTools.readTextFile(storageRoot, workspace, "keep.txt"));
+    }
+
+    @Test
+    public void rejectsOversizeTextReads() throws Exception {
+        Files.write(new File(workspace, "large.txt").toPath(),
+                repeat('x', AgentTools.MAX_READ_FILE_BYTES + 1).getBytes(StandardCharsets.UTF_8));
+
+        try {
+            AgentTools.readTextFile(storageRoot, workspace, "large.txt");
+            fail("Expected a file over the read limit to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("64 KiB"));
+        }
+    }
+
+    @Test
+    public void boundsDirectoryListingAndMarksTruncation() throws Exception {
+        for (int i = 0; i <= AgentTools.MAX_DIRECTORY_ENTRIES; i++) {
+            Files.createFile(new File(workspace, String.format("entry-%03d.txt", i)).toPath());
+        }
+
+        String listing = AgentTools.listDirectory(storageRoot, workspace, "");
+
+        assertTrue(listing.contains("listing truncated"));
+        assertTrue(listing.split("\\n").length <= AgentTools.MAX_DIRECTORY_ENTRIES + 1);
     }
 
     @Test
@@ -89,8 +241,35 @@ public class AgentToolsTest {
         assertTrue(wcResult.startsWith("Exit code 0:"));
         assertTrue(lsResult.contains("hello.txt"));
         assertTrue(pwdResult.contains(workspace.getCanonicalPath()));
-        assertTrue(rejectedResult.contains("only pwd, ls, cat, and wc are allowed"));
+        assertTrue(rejectedResult.contains("not in the safe command set"));
         assertFalse(new File(workspace, "should-not-exist").exists());
+    }
+
+    @Test
+    public void warnsWhenCommandOrArgumentCountIsUnsupported() {
+        String unknownCommand = AgentTools.commandPolicyWarning("sh",
+                Arrays.asList("-c", "echo unsafe"));
+        String tooManyArguments = AgentTools.commandPolicyWarning("ls",
+                Arrays.asList(".", "extra"));
+        String validCommand = AgentTools.commandPolicyWarning("ls",
+                Collections.singletonList("."));
+
+        assertTrue(unknownCommand.contains("not in the safe command set"));
+        assertTrue(tooManyArguments.contains("too many arguments"));
+        assertEquals(null, validCommand);
+    }
+
+    @Test
+    public void listsLargeCommandDirectoriesWithBoundedResults() throws Exception {
+        for (int i = 0; i <= AgentTools.MAX_DIRECTORY_ENTRIES; i++) {
+            Files.createFile(new File(workspace, String.format("f%04d", i)).toPath());
+        }
+
+        String result = AgentTools.runCommand(workspace, cacheDirectory, "ls",
+                Collections.emptyList());
+
+        assertTrue(result.contains("listing truncated"));
+        assertTrue(result.length() < AgentTools.MAX_COMMAND_OUTPUT_BYTES + 100);
     }
 
     @Test
@@ -100,7 +279,7 @@ public class AgentToolsTest {
                     "cat", Collections.singletonList("../outside.txt"));
             fail("Expected the command path to be rejected.");
         } catch (IOException expected) {
-            assertTrue(expected.getMessage().contains("Path must stay inside the private workspace"));
+            assertTrue(expected.getMessage().contains("Path must stay inside the agent workspace"));
         }
     }
 

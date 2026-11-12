@@ -96,63 +96,65 @@ A selected contact or file is not sent to DeepSeek merely by selecting it; it is
 
 ### FR-005: Default user-visible workspace
 
-**Status: Gap.** The default workspace shall be the directory `/storage/emulated/0/mobileagent`. Workspace-relative file and directory operations shall resolve beneath this location by default. The application shall create the directory when it can do so and shall show a clear, actionable error if Android has not granted the required access.
+**Status: Implemented in source; device verification pending.** The default workspace shall be the directory `/storage/emulated/0/mobileagent`. Workspace-relative file and directory operations shall resolve beneath this location by default. The application shall create the directory when it can do so and shall show a clear, actionable error if Android has not granted the required access.
 
-The application shall not silently substitute its private app directory when the requested shared workspace is inaccessible. It shall preserve user files and shall disclose whether a requested path is outside the accessible storage boundary. The exact Android access mechanism is subject to [OD-001](#od-001-storage-access-and-root-boundary).
+The application shall not silently substitute its private app directory when the requested shared workspace is inaccessible. It shall preserve user files and shall disclose whether a requested path is outside the accessible storage boundary. Android's all-files access is requested where available; actual access remains subject to Android's permissions and sandbox. The product decision on requested device paths is recorded in [OD-001](#od-001-storage-access-and-root-boundary).
 
 ### FR-006: Read, write, and list device files
 
-**Status: Gap.** The agent shall be able to propose reading files, listing directories, creating or replacing UTF-8 text files, and creating directories at user-authorized paths on the device. If a tool call omits an absolute path, it shall use the default workspace. Paths supplied to a tool shall be shown in the approval prompt before a read or write occurs.
+**Status: Partially implemented; device verification pending.** The agent shall be able to propose reading files, listing directories, creating or replacing UTF-8 text files, and creating directories at user-authorized paths on the device. If a tool call omits an absolute path, it shall use the default workspace. Paths supplied to a tool shall be shown in the approval prompt before a read or write occurs.
 
-The application shall reject malformed paths and shall not follow a path outside the selected/granted root unless the user explicitly requested that path and the operating system grants access. Before a read, the approval prompt shall state that the file contents will be returned to the model service as tool output. A write shall report the path and whether it succeeded. A failed or denied operation shall leave existing data unchanged. The application shall not imply that Android app-private data belonging to other applications is accessible on an unrooted device.
+The application shall reject malformed paths and shall not follow a path outside the selected/granted root unless the user explicitly requested that path and the operating system grants access. Relative paths shall stay within the default workspace; an explicit absolute path may target another device location. Before a read, the approval prompt shall state that the file contents will be returned to the model service as tool output. A write shall report the path and whether it succeeded. A failed or denied operation shall leave existing data unchanged. The application shall not imply that Android app-private data belonging to other applications is accessible on an unrooted device.
 
-The current prototype only creates files within an app-private workspace and limits each file to 16 KiB; it has no general read or directory-management tool. The target storage scope and any size limits must be implemented and verified.
+The implementation provides read, write, list, and create-directory tools with explicit approval. Writes are limited to 16 KiB, reads to 64 KiB, and directory listings to 500 entries/32 KiB. Absolute paths are accepted, but Android may deny protected or other-app private paths; access to the full device is not established by unit tests and remains device/platform validation.
 
 **Evidence:** `AgentTools.java:17-56`; `AgentToolsTest.java:36-70`.
 
 ### FR-007: Run local device commands
 
-**Status: Gap.** The agent shall be able to propose and, after explicit user approval, run arbitrary commands on the Android device. The default working directory shall be the workspace; a different working directory shall be shown and approved before execution. The approval view shall show the exact command, arguments, working directory, and whether elevated execution was requested. The application shall return the observed exit status and captured output, or a clear timeout, cancellation, permission, or execution error.
+**Status: Gap.** The agent shall be able to propose and, after explicit user approval, run arbitrary commands on the Android device. The AI model shall select the working directory for each command; the approval view shall show the exact command, arguments, working directory, and whether elevated execution was requested. The application shall execute only the approved command and working directory, without silently substituting either.
 
-On a rooted device, the user shall be able to approve a command that invokes the installed `su` mechanism. Root access shall never be attempted silently. Android and any installed root manager remain authoritative over whether elevation is granted. The approval prompt shall state that captured command output will be returned to the model service as tool output. On a non-rooted device, commands run with the app's ordinary OS identity and permissions; the application shall not claim that arbitrary commands bypass Android's sandbox.
+Command output shall stream into a speech bubble while the command runs. The bubble shall provide a Cancel control; cancellation shall stop the running command and report its final status and output captured so far. The application shall impose no command-duration timeout and no command-output size limit or truncation. The user can cancel a command if it runs too long or produces excessive output. On completion or cancellation, the captured output shall be returned to the model service as tool output.
 
-The command interface shall not execute a modified command after approval. Output, duration, cancellation, and interactive-command limits require resolution under [OD-002](#od-002-command-execution-policy). The current implementation is deliberately not a general shell: it permits only `pwd`, `ls`, `cat`, and `wc` inside a private workspace, with two arguments maximum, a 5-second execution timeout, and bounded output.
+Interactive commands and shell input redirection/pipelines shall be supported; the agent shall provide required input through the command it proposes (for example, `yes | apt update`) rather than waiting for the user to type into an interactive terminal. The complete command, including shell syntax and redirections, shall be visible in the approval view before execution.
 
-**Evidence:** `AgentTools.java:59-110`; `MainActivity.java:463-490,541-557,595-602`; `AgentToolsTest.java:72-116`.
+On a rooted device, the user may approve a command that invokes the installed `su` mechanism. The application shall not invoke `su` before its own explicit command approval. The `su` program or installed root manager shall retain its own authorization prompt and decide whether elevated execution is granted; that prompt is an additional gate, not a bypass. On a non-rooted device, commands run with the app's ordinary OS identity and permissions, and the application shall not claim that commands bypass Android's sandbox. The command approval shall disclose that output is returned to the model service.
+
+The current implementation is a restricted read-only subset: it supports `pwd`, `ls`, `cat`, and `wc` in the agent workspace and does not provide a general shell, interactive input, or `su`. This is an implementation gap against the target behavior.
 
 ### FR-008: Create and execute Android intents
 
-**Status: Gap.** The agent shall be able to propose an Android intent for a device action and, after explicit approval, ask Android to dispatch it using the appropriate platform mechanism. The approval view shall present all material fields the application is about to submit, including action, target or package when specified, data URI, MIME type, and extras. If a field cannot be rendered safely or meaningfully, execution shall be refused and the user told why.
+**Status: Partially implemented; device verification pending.** The agent shall be able to propose an Android intent for a device action and, after explicit approval, ask Android to dispatch it using the appropriate platform mechanism. The approval view shall present all material fields the application is about to submit, including action, target or package when specified, data URI, MIME type, and extras. If a field cannot be rendered safely or meaningfully, execution shall be refused and the user told why.
 
 The application shall respect Android component visibility, export status, permissions, background-execution restrictions, URI grants, and any system confirmation. It shall not silently grant additional URI access or bypass a platform restriction. If multiple eligible apps exist, the user shall be able to choose or use the Android resolver. If no eligible app exists, the operation shall fail without claiming success.
 
-The existing calendar action is a supported instance: after approval it opens an event draft in a calendar application; the calendar application controls the final save. The target capability is not limited to calendar intents.
+The implementation supports activity intents with action, data URI, MIME type, package, and text extras, plus the calendar and message-draft flows. Every intent preview shows the supplied fields and dispatch requires Allow. The target capability is not limited to the currently supported intent fields; unsupported intent forms remain an implementation gap. External side effects cannot be undone by this app.
 
-**Evidence:** `MainActivity.java:463-492,559-576`; `AgentTools.java:113-127`.
+**Evidence:** `MainActivity.java:719-735,983-1030,1068-1090`.
 
 ### FR-009: Search contacts and prepare a message
 
-**Status: Gap.** When a prompt refers to a person by name, the agent shall be able to search the device's contacts after the user grants the required Android contacts permission. It shall show matching names and relevant available communication details. If more than one person matches, it shall ask the user to select the intended person before constructing a communication action. If no match exists, it shall ask the user for another identifier or report that no match was found.
+**Status: Partially implemented; device verification pending.** When a prompt refers to a person by name, the agent shall be able to search the device's contacts after the user grants the required Android contacts permission. It shall show matching names and relevant available communication details. If more than one person matches, it shall ask the user to select the intended person before constructing a communication action. If no match exists, it shall ask the user for another identifier or report that no match was found.
 
 For a selected person, the agent shall be able to prepare a message using an installed application capable of handling the requested channel, including SMS, WhatsApp, or another compatible application. The selected recipient and message shall be displayed for approval. The external application shall retain the final ability to send; Mobile Agent shall not claim a message was sent just because a compose screen or intent was opened.
 
-The application shall request contacts permission only when this feature is invoked, explain why it is needed, and continue to support manual contact selection or user-provided recipient details when permission is denied, where Android permits. Contact data shall be sent to DeepSeek only when included in a user-submitted prompt.
+The application shall request contacts permission only when this feature is invoked, explain why it is needed, and continue to support manual contact selection or user-provided recipient details when permission is denied, where Android permits. Contact data shall be sent to DeepSeek only when included in a user-submitted prompt. The implementation searches up to 20 phone-contact matches and displays their names and numbers locally; the tool result sent to DeepSeek contains only the match count and instructions to ask the user to choose. Only SMS and WhatsApp drafts are currently supported; other compatible channels and device verification remain outstanding.
 
-**Evidence:** `MainActivity.java:222-229,313-327`; `AndroidManifest.xml:1-22` currently declares no contacts permission.
+**Evidence:** `MainActivity.java:649-681,838-879,1060-1067`; `AndroidManifest.xml` declares contacts permission.
 
 ### FR-010: Capture a photo
 
-**Status: Gap.** The chat screen shall provide an action to capture a new photo using the device's camera capability. After capture, the application shall show that a photo is ready to attach, permit the user to discard it, and include it only with the next submitted prompt. The application shall handle user cancellation, camera unavailability, capture failure, and storage/permission failure without losing the chat draft.
+**Status: Implemented in source; device verification pending.** The chat screen shall provide an action to capture a new photo using the device's camera capability. After capture, the application shall show that a photo is ready to attach, permit the user to discard it, and include it only with the next submitted prompt. The application shall handle user cancellation, camera unavailability, capture failure, and storage/permission failure without losing the chat draft.
 
 A photo shall not be uploaded merely because the camera was opened or a capture completed. It is sent to DeepSeek only when the user submits a message with the captured image attached. If capture is performed by another camera application, that application controls its own capture UI and permissions.
 
 ### FR-011: Agent files and notes view
 
-**Status: Gap.** The application shall provide a third top-level view, in addition to chat and API settings, where the user can browse and open files and directories in the agent workspace. It shall display actual stored content and shall not display example or generated file entries that do not exist.
+**Status: Implemented in source; device verification pending.** The application shall provide a third top-level view, in addition to chat and API settings, where the user can browse and open files and directories in the agent workspace. It shall display actual stored content and shall not display example or generated file entries that do not exist.
 
 The view shall support agent-maintained notes and skill documents, including conventional names such as `user.md`, `soul.md`, and a `skills/` directory when those items exist. The workspace files shall remain available after the app process closes. Any model-proposed write or replacement to these files shall follow [FR-012](#fr-012-explicit-action-approval). The view shall report unreadable, missing, or inaccessible files without presenting stale content as current.
 
-Whether workspace notes are automatically added to model context, and how skills are selected or loaded, are not specified by the draft; see [OD-003](#od-003-agent-memory-and-skill-loading).
+Workspace notes are not added automatically. The system prompt tells the model that `user.md`, `soul.md`, and `skills/` may exist and to use the file tools to inspect relevant content on demand. File reads require approval and are returned to DeepSeek; see [OD-003](#od-003-agent-memory-and-skill-loading).
 
 ### FR-012: Explicit action approval
 
@@ -204,7 +206,7 @@ No denied or unapproved model-proposed action may execute. The user must be able
 
 ### NFR-003: Data bounds and responsiveness
 
-The application shall keep network I/O off the UI thread, give the user visible progress while an operation is pending, and restore an interactive state after success or failure. Existing image, text-file, tool-output, and request time limits remain current prototype behavior until the product explicitly revises them. New limits must be documented and tested rather than silently truncating data.
+The application shall keep network I/O off the UI thread, give the user visible progress while an operation is pending, and restore an interactive state after success or failure. Existing image, text-file, non-command tool-output, and request limits remain current prototype behavior until the product explicitly revises them. Command duration and output are governed by [FR-007](#fr-007-run-local-device-commands): they shall not be limited or silently truncated by the application.
 
 ### NFR-004: Recoverability
 
@@ -236,19 +238,19 @@ On a supported device, verify the application resolves the default workspace to 
 
 ### TC-005: Path containment and failed writes
 
-Attempt empty, malformed, unauthorized, and traversal paths. Verify no file outside the approved target is read or changed. Deny a write approval and verify the target file remains unchanged. Simulate a failed write and verify the UI reports failure rather than success.
+Attempt empty, malformed, unauthorized, and traversal paths. Verify relative traversal outside the workspace is rejected, while an explicitly supplied absolute path is used only when Android permits access. Verify no file outside the approved target is read or changed. Deny a write approval and verify the target file remains unchanged. Simulate a failed write and verify the UI reports failure rather than success.
 
 ### TC-006: Command execution and root handling
 
-Propose a harmless local command and verify the approval shows the exact command, arguments, directory, and privilege level. Deny it and verify it does not run. Approve it and verify status/output are returned. On a rooted test device, verify an `su` command is not attempted until approved and that root-manager denial is reported. On a non-rooted device, verify the application reports ordinary sandbox permission failures rather than claiming root access.
+Propose a harmless command and verify the AI-selected working directory, exact command (including shell input redirection), arguments, and privilege request are shown for approval. Deny it and verify it does not run. Approve it and verify output streams into the command bubble, the command can run beyond the former timeout and produce output beyond the former size bound without truncation, and Cancel stops a long-running command while preserving its captured output and final status. Verify an input pipeline such as `yes | apt update` is passed as the approved command rather than requiring terminal input. On a rooted test device, verify `su` is invoked only after app approval and that its separate root-manager prompt can allow or deny elevation. On a non-rooted device, verify ordinary Android sandbox permissions still apply.
 
 ### TC-007: Intent dispatch
 
-Propose a supported calendar intent and verify the approval opens a draft without saving it. Test another installed handler, multiple handlers, no handler, invalid data, and platform permission denial. Verify intent fields are shown before approval and no intent is dispatched after Deny.
+Propose a supported calendar intent and verify the approval opens a draft without saving it. Test another installed handler, multiple handlers, no handler, invalid data, and platform permission denial. Verify all supported intent fields and recipients are shown before approval, no intent is dispatched after Deny, and potentially externally visible actions cannot launch without Allow.
 
 ### TC-008: Contact lookup and message preparation
 
-Grant contacts access and search a name with zero, one, and multiple matches. Verify multiple matches require user selection. Prepare an SMS or other installed-app message and verify recipient and body are shown before launch. Verify the target application retains the final Send action. Deny contacts permission and verify the app continues without silently accessing contacts.
+Grant contacts access and search a name with zero, one, and multiple matches. Verify matches are displayed locally and names/numbers are absent from tool output sent to DeepSeek. Verify multiple matches require user selection, and contact details are sent only if the user includes them in a submitted message. Prepare a supported SMS or WhatsApp draft and verify recipient and body are shown before launch. Verify the target application retains the final Send action. Deny contacts permission and verify the app continues without silently accessing contacts.
 
 ### TC-009: Camera capture
 
@@ -272,37 +274,43 @@ Simulate an external application closing or returning an ambiguous result after 
 
 | Area | Target requirement | Current evidence | Status |
 |---|---|---|---|
-| Shared workspace | `/storage/emulated/0/mobileagent` | `AgentTools.workspaceDirectory()` creates app-private `files/workspace` | Gap; see [FR-005](#fr-005-default-user-visible-workspace) |
-| General filesystem | Read/write/list at user-authorized locations | Create-only text files in the private workspace, 16 KiB maximum | Gap; see [FR-006](#fr-006-read-write-and-list-device-files) |
-| Commands | Arbitrary device command, optional approved `su` | Four read-only commands in private workspace | Gap; see [FR-007](#fr-007-run-local-device-commands) |
-| Intents | General Android intent execution | Calendar event intent only | Gap; see [FR-008](#fr-008-create-and-execute-android-intents) |
-| Contacts | Search all matching contacts and disambiguate | User picks one phone contact | Gap; see [FR-009](#fr-009-search-contacts-and-prepare-a-message) |
-| Camera | Capture new image for prompt | Existing image picker only | Gap; see [FR-010](#fr-010-capture-a-photo) |
-| Navigation/files | Third view for agent-maintained workspace files | Settings and chat screens; no file browser evidenced | Gap; see [FR-011](#fr-011-agent-files-and-notes-view) |
+| Shared workspace | `/storage/emulated/0/mobileagent` | Shared-storage workspace creation, file tools, and Agent files view | Implemented in source; device validation pending; see [FR-005](#fr-005-default-user-visible-workspace) |
+| General filesystem | Read/write/list at user-authorized locations | Approval-gated read/write/list/create-directory tools; absolute paths attempted; documented size bounds | Partial; Android access and device validation remain; see [FR-006](#fr-006-read-write-and-list-device-files) |
+| Commands | Arbitrary device command, optional approved `su` | Four read-only commands in the user-visible workspace | Gap; see [FR-007](#fr-007-run-local-device-commands) |
+| Intents | General Android intent execution | Approval-gated activity intents with supported action/data/type/package/text-extra fields, plus calendar and message-draft flows | Partial; remaining intent forms and device validation; see [FR-008](#fr-008-create-and-execute-android-intents) |
+| Contacts | Search all matching contacts and disambiguate | Approval-gated phone-contact search; up to 20 local-only matches; SMS/WhatsApp drafts | Partial; other channels and device validation; see [FR-009](#fr-009-search-contacts-and-prepare-a-message) |
+| Camera | Capture new image for prompt | Camera capture flow uses an output URI and pending attachment | Implemented in source; device validation pending; see [FR-010](#fr-010-capture-a-photo) |
+| Navigation/files | Third view for agent-maintained workspace files | Separate Agent files view browses actual workspace contents | Implemented in source; device validation pending; see [FR-011](#fr-011-agent-files-and-notes-view) |
 | IME layout | Composer stays visible above keyboard | Manifest uses `adjustResize`; explicit layout acceptance is not evidenced | Validation required; see [FR-003](#fr-003-chat-composer-and-keyboard-layout) |
 
 ### OD-001: Storage access and root boundary
 
 - **Owner:** Product owner and Android implementer.
-- **Decision needed:** Specify which paths must be accessible on each supported Android version, how shared-storage access is requested, and whether rooted devices must expose paths beyond Android's ordinary app permissions. `/storage/emulated/0/mobileagent` is the required default, but this FSD does not assume that granting access to shared storage also permits access to other applications' private data.
+- **Status:** Product decision resolved; full-device access and platform validation remain implementation gaps.
+- **Decision**: if requested, the app has access to the entire device data. file changes somewhere else than the default directory must only be possible after confirmation of the user.
+- **Implementation constraint:** File tools accept explicit absolute paths and require per-action approval. Android all-files access does not bypass protected system paths or other-app private-data sandboxing; the current file tools do not invoke `su`. Do not claim full-device access until a supported, user-approved mechanism is implemented and verified.
 - **Evidence to close:** Verify the chosen mechanism on API 26, API 29, and the current target API 35, with both ordinary and restricted paths; document unsupported paths and user-visible permission flows.
 
 ### OD-002: Command execution policy
 
-- **Owner:** Product owner.
-- **Decision needed:** Set command duration, output-size limits, cancellation behavior, environment/working-directory policy, and whether commands requiring interactive input are supported. Confirm whether shell syntax is part of the user-visible contract. The draft requires arbitrary local commands and optional `su`; the current 5-second timeout and 8 KiB output bound are prototype implementation values, not yet accepted target limits.
-- **Evidence to close:** Test harmless representative commands, timeout and cancellation, output truncation, non-root behavior, and root-manager denial on a rooted test device.
+- **Status:** Resolved by the product owner; implementation and device verification remain open.
+- **Decision:** Do not impose an application-level command timeout or output-size limit. Stream output into the command's speech bubble and provide a Cancel control so the user can stop a command that runs too long or produces excessive output. The AI model selects the working directory for each command, and the exact command, working directory, shell syntax, and privilege request require explicit app approval. Support interactive input through command input redirection/pipelines. Permit invoking the installed `su` mechanism only after app approval; `su`/the root manager supplies a separate authorization prompt and controls elevation.
+- **Evidence to close:** On supported Android versions, test a command that exceeds the former timeout, output larger than the former bound, cancellation with output retained and final status reported, model-selected working directories, an input-redirection/pipeline command, ordinary non-root sandbox behavior, and both approval and denial at the root-manager prompt.
 
 ### OD-003: Agent memory and skill loading
 
 - **Owner:** Product owner.
-- **Decision needed:** Decide whether `user.md`, `soul.md`, and skill files are only persistent files available on demand, or whether selected contents are automatically loaded into model context; define when the model may update memory and how skill files are selected. No automatic upload or execution of workspace content is implied until this is decided.
+- **Status:** Resolved by the product owner; implemented in the system prompt.
+- **Decision**: in the system prompt, mention that these files are available and via the read file tool call these files can be read on demand.
+- **Implementation:** Notes and skills are not automatically loaded. The prompt directs the model to inspect relevant files on demand; reads are approval-gated and their content is sent to DeepSeek. The model may propose memory edits through file tools, but every write requires approval under [FR-012](#fr-012-explicit-action-approval); no note is changed automatically.
 - **Evidence to close:** Review a user-visible flow showing what content is read locally, what is sent to DeepSeek, and what approval is required for writes.
 
 ### OD-004: Intent scope and recipient confirmation
 
 - **Owner:** Product owner and Android implementer.
-- **Decision needed:** Confirm which intent dispatch classes are supported and how the approval preview represents complex extras, unresolved recipients, and intents whose effects cannot be predicted. The requirement remains “any intent that Android permits”; this does not imply bypassing Android restrictions or silently sending messages.
+- **Status:** Resolved by the product owner; implementation and device verification remain open.
+- **Decision**: since every intent needs to be approved by the user, no silent messages can be sent, since upon revieweing the request the user can spot any secret messages.
+- **Implementation:** The approval view displays the exact supported intent fields and states that dispatch occurs only after Allow. Intent side effects may still occur in the external app and cannot be undone by this app.
 - **Evidence to close:** Exercise supported intents against installed and missing handlers and verify approval fidelity and external-app handoff.
 
 ## 9. Requirement index

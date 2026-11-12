@@ -1,16 +1,22 @@
 package com.maximiliankraft.mobileagent;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
+import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Build;
+import android.os.Environment;
 import android.provider.CalendarContract;
 import android.provider.ContactsContract;
+import android.provider.MediaStore;
+import android.provider.Settings;
 import android.net.Uri;
 import android.util.Base64;
 import android.view.inputmethod.EditorInfo;
@@ -21,7 +27,6 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -56,11 +61,16 @@ public class MainActivity extends Activity {
     private static final int PICK_FILE = 2;
     private static final int PICK_CONTACT = 3;
     private static final int EDIT_API_KEY = 4;
+    private static final int PICK_CAMERA = 5;
+    private static final int REQUEST_STORAGE_ACCESS = 6;
+    private static final int REQUEST_LEGACY_STORAGE = 7;
+    private static final int REQUEST_CONTACTS = 8;
     private static final int MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
     private static final int MAX_TEXT_FILE_BYTES = 32 * 1024;
     private static final ExecutorService IO_EXECUTOR = Executors.newSingleThreadExecutor();
 
     private final List<JSONObject> conversation = new ArrayList<>();
+    private final List<String> pendingAttachmentLabels = new ArrayList<>();
     private LinearLayout messages;
     private EditText messageInput;
     private ScrollView messageScroll;
@@ -68,9 +78,13 @@ public class MainActivity extends Activity {
     private TextView attachmentStatus;
     private String apiKey;
     private String pendingImageDataUrl;
+    private File pendingCameraFile;
+    private Uri pendingCameraUri;
     private String pendingContext = "";
     private boolean busy;
     private int apiTurnsRemaining;
+    private Runnable contactPermissionGranted;
+    private Runnable contactPermissionDenied;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -109,6 +123,12 @@ public class MainActivity extends Activity {
                 startActivityForResult(new Intent(this, SettingsActivity.class)
                         .putExtra("return_to_chat", true), EDIT_API_KEY));
         page.addView(titleRow);
+        Button filesButton = new Button(this);
+        filesButton.setText("Agent files");
+        filesButton.setAllCaps(false);
+        filesButton.setOnClickListener(view ->
+                startActivity(new Intent(this, FilesActivity.class)));
+        titleRow.addView(filesButton);
         TextView subtitle = text("DeepSeek · actions always need your approval", 14, MUTED, false);
         subtitle.setPadding(0, dp(4), 0, dp(12));
         page.addView(subtitle);
@@ -130,9 +150,11 @@ public class MainActivity extends Activity {
         LinearLayout attachmentActions = new LinearLayout(this);
         attachmentActions.setGravity(Gravity.CENTER_VERTICAL);
         Button imageButton = attachmentButton("Image", () -> chooseContent(PICK_IMAGE));
+        Button cameraButton = attachmentButton("Camera", this::capturePhoto);
         Button fileButton = attachmentButton("File", () -> chooseContent(PICK_FILE));
         Button contactButton = attachmentButton("Contact", this::chooseContact);
         attachmentActions.addView(imageButton);
+        attachmentActions.addView(cameraButton);
         attachmentActions.addView(fileButton);
         attachmentActions.addView(contactButton);
         page.addView(attachmentActions);
@@ -141,6 +163,7 @@ public class MainActivity extends Activity {
         Button clearAttachments = attachmentButton("Clear selected items", () -> {
             pendingImageDataUrl = null;
             pendingContext = "";
+            pendingAttachmentLabels.clear();
             updateAttachmentStatus();
         });
         page.addView(clearAttachments);
@@ -171,7 +194,6 @@ public class MainActivity extends Activity {
         if (!pendingContext.isEmpty()) {
             content += "\n\nSelected context:\n" + pendingContext;
         }
-        messageInput.setText("");
         JSONObject userMessage = message("user", content);
         if (pendingImageDataUrl != null) {
             try {
@@ -185,6 +207,7 @@ public class MainActivity extends Activity {
                 return;
             }
         }
+        messageInput.setText("");
         conversation.add(userMessage);
         addMessage("user", content);
         if (pendingImageDataUrl != null) {
@@ -192,6 +215,7 @@ public class MainActivity extends Activity {
         }
         pendingImageDataUrl = null;
         pendingContext = "";
+        pendingAttachmentLabels.clear();
         updateAttachmentStatus();
         busy = true;
         apiTurnsRemaining = MAX_API_TURNS;
@@ -229,11 +253,77 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void capturePhoto() {
+        try {
+            File pictures = getExternalFilesDir(Environment.DIRECTORY_PICTURES);
+            if (pictures == null || (!pictures.exists() && !pictures.mkdirs())) {
+                throw new IOException("App-specific photo storage is unavailable.");
+            }
+            File outputFile = File.createTempFile("capture-", ".jpg", pictures);
+            Uri outputUri = new Uri.Builder()
+                    .scheme(ContentResolver.SCHEME_CONTENT)
+                    .authority(getPackageName() + ".capture")
+                    .appendPath("capture")
+                    .appendPath(outputFile.getName())
+                    .build();
+            Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                    .putExtra(MediaStore.EXTRA_OUTPUT, outputUri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            intent.setClipData(ClipData.newRawUri("Mobile Agent photo", outputUri));
+            pendingCameraFile = outputFile;
+            pendingCameraUri = outputUri;
+            startActivityForResult(intent, PICK_CAMERA);
+        } catch (ActivityNotFoundException exception) {
+            deletePendingCameraFile();
+            showToast("No camera app is available.");
+        } catch (IOException exception) {
+            deletePendingCameraFile();
+            showToast("Could not prepare camera capture: " + safeError(exception.getMessage()));
+        } catch (Exception exception) {
+            deletePendingCameraFile();
+            showToast("Could not start camera capture: " + safeError(exception.getMessage()));
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == EDIT_API_KEY) {
             apiKey = ((MobileAgentApplication) getApplication()).getApiKey();
+            return;
+        }
+        if (requestCode == REQUEST_STORAGE_ACCESS || requestCode == REQUEST_LEGACY_STORAGE) {
+            return;
+        }
+        if (requestCode == PICK_CAMERA) {
+            File capturedFile = pendingCameraFile;
+            Uri capturedUri = pendingCameraUri;
+            pendingCameraFile = null;
+            pendingCameraUri = null;
+            if (resultCode != RESULT_OK) {
+                deleteFile(capturedFile);
+                showToast("Photo capture was canceled. Your prompt is unchanged.");
+                return;
+            }
+            try {
+                if (capturedUri == null || capturedFile == null || !capturedFile.isFile()
+                        || capturedFile.length() == 0) {
+                    throw new IOException("The camera did not write a photo.");
+                }
+                byte[] imageBytes = readUriBytes(capturedUri, MAX_ATTACHMENT_BYTES);
+                clearPendingImageLabel();
+                pendingImageDataUrl = "data:image/jpeg;base64,"
+                        + Base64.encodeToString(imageBytes, Base64.NO_WRAP);
+                pendingAttachmentLabels.add("Camera photo");
+                updateAttachmentStatus();
+                showToast("Photo ready. Add a prompt and send it.");
+            } catch (Exception exception) {
+                showToast("Photo capture failed: " + safeError(exception.getMessage())
+                        + " Your prompt is unchanged.");
+            } finally {
+                deleteFile(capturedFile);
+            }
             return;
         }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) {
@@ -248,8 +338,10 @@ public class MainActivity extends Activity {
                     return;
                 }
                 byte[] imageBytes = readUriBytes(uri, MAX_ATTACHMENT_BYTES);
+                clearPendingImageLabel();
                 pendingImageDataUrl = "data:" + mimeType + ";base64,"
                         + Base64.encodeToString(imageBytes, Base64.NO_WRAP);
+                pendingAttachmentLabels.add("Image: " + uri.getLastPathSegment());
                 updateAttachmentStatus();
                 showToast("Image attached. Add a prompt and send it.");
             } else if (requestCode == PICK_FILE) {
@@ -257,10 +349,13 @@ public class MainActivity extends Activity {
                         StandardCharsets.UTF_8);
                 pendingContext += "\nSelected text file (" + uri.getLastPathSegment()
                         + "):\n" + fileText;
+                pendingAttachmentLabels.add("Text file: " + uri.getLastPathSegment());
                 updateAttachmentStatus();
                 showToast("File attached to the next prompt.");
             } else if (requestCode == PICK_CONTACT) {
-                pendingContext += "\nSelected contact:\n" + readContact(uri);
+                String contact = readContact(uri);
+                pendingContext += "\nSelected contact:\n" + contact;
+                pendingAttachmentLabels.add("Contact: " + contact.split("\\n", 2)[0]);
                 updateAttachmentStatus();
                 showToast("Contact added to the next prompt.");
             }
@@ -269,24 +364,60 @@ public class MainActivity extends Activity {
         }
     }
 
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_CONTACTS) {
+            Runnable continuation = grantResults.length > 0 && grantResults[0]
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    ? contactPermissionGranted : contactPermissionDenied;
+            contactPermissionGranted = null;
+            contactPermissionDenied = null;
+            if (continuation != null) {
+                continuation.run();
+            }
+        } else if (requestCode == REQUEST_LEGACY_STORAGE
+                && !hasSharedStorageAccess()) {
+            showToast("Shared-storage access was not granted; retry the action after granting access.");
+        }
+    }
+
     private void updateAttachmentStatus() {
         if (attachmentStatus == null) {
             return;
         }
         StringBuilder status = new StringBuilder();
-        if (pendingImageDataUrl != null) {
-            status.append("Image selected");
-        }
-        if (!pendingContext.isEmpty()) {
+        for (String label : pendingAttachmentLabels) {
             if (status.length() > 0) {
                 status.append(" · ");
             }
-            status.append("File/contact context selected");
+            status.append(label);
         }
         if (status.length() > 0) {
             status.append(" — sent with your next message");
         }
         attachmentStatus.setText(status.toString());
+    }
+
+    private void clearPendingImageLabel() {
+        for (int i = pendingAttachmentLabels.size() - 1; i >= 0; i--) {
+            String label = pendingAttachmentLabels.get(i);
+            if (label.startsWith("Image:") || "Camera photo".equals(label)) {
+                pendingAttachmentLabels.remove(i);
+            }
+        }
+    }
+
+    private void deletePendingCameraFile() {
+        deleteFile(pendingCameraFile);
+        pendingCameraFile = null;
+        pendingCameraUri = null;
+    }
+
+    private void deleteFile(File file) {
+        if (file != null && file.exists() && !file.delete()) {
+            file.deleteOnExit();
+        }
     }
 
     private byte[] readUriBytes(Uri uri, int maximumBytes) throws IOException {
@@ -438,10 +569,65 @@ public class MainActivity extends Activity {
             processToolCall(assistantMessage, calls, index + 1);
             return;
         }
+        if ("run_command".equals(name)) {
+            try {
+                JSONArray suppliedArgs = arguments.getJSONArray("args");
+                List<String> commandArgs = new ArrayList<>();
+                for (int i = 0; i < suppliedArgs.length(); i++) {
+                    commandArgs.add(suppliedArgs.getString(i));
+                }
+                String warning = AgentTools.commandPolicyWarning(
+                        arguments.getString("command"), commandArgs);
+                if (warning != null) {
+                    appendToolResult(callId, warning);
+                    processToolCall(assistantMessage, calls, index + 1);
+                    return;
+                }
+            } catch (JSONException exception) {
+                String warning = "Warning: invalid command arguments; no command was executed.";
+                appendToolResult(callId, warning);
+                processToolCall(assistantMessage, calls, index + 1);
+                return;
+            }
+        }
         showToolApproval(name, arguments, approved -> {
+            if (approved && "search_contacts".equals(name)
+                    && checkSelfPermission(android.Manifest.permission.READ_CONTACTS)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestContactsPermission(callId, assistantMessage, calls, index, arguments);
+                return;
+            }
+            if (approved && requiresSharedStorage(name) && !hasSharedStorageAccess()) {
+                new AlertDialog.Builder(this)
+                        .setTitle("Device storage access required")
+                        .setMessage("Mobile Agent needs Android storage access for the requested "
+                                + "path. Grant all-files access in Android settings, then retry. "
+                                + "Android may still deny protected system and other-app private "
+                                + "data; this app does not bypass those restrictions.")
+                        .setNegativeButton("Cancel", (dialog, which) -> {
+                            appendToolResult(callId, "Shared-storage access was not granted; no file was read or changed.");
+                            processToolCall(assistantMessage, calls, index + 1);
+                        })
+                        .setPositiveButton("Open settings", (dialog, which) -> {
+                            openSharedStorageSettings();
+                            appendToolResult(callId, "Grant shared-storage access in Android settings, then retry this action.");
+                            processToolCall(assistantMessage, calls, index + 1);
+                        })
+                        .setOnCancelListener(dialog -> {
+                            appendToolResult(callId, "Shared-storage access was not granted; no file was read or changed.");
+                            processToolCall(assistantMessage, calls, index + 1);
+                        })
+                        .show();
+                return;
+            }
             boolean started = AgentTools.runApprovedAction(approved, () -> {
-                if ("open_calendar".equals(name)) {
-                    appendToolResult(callId, executeCalendarTool(arguments));
+                if ("open_calendar".equals(name) || "launch_intent".equals(name)
+                        || "prepare_message".equals(name)) {
+                    String result = "open_calendar".equals(name)
+                            ? executeCalendarTool(arguments)
+                            : "launch_intent".equals(name)
+                            ? executeIntentTool(arguments) : executeMessageTool(arguments);
+                    appendToolResult(callId, result);
                     processToolCall(assistantMessage, calls, index + 1);
                     return;
                 }
@@ -460,6 +646,42 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void requestContactsPermission(String callId, JSONObject assistantMessage,
+                                           JSONArray calls, int index, JSONObject arguments) {
+        contactPermissionGranted = () -> executeApprovedContactSearch(callId,
+                assistantMessage, calls, index, arguments);
+        contactPermissionDenied = () -> {
+            appendToolResult(callId, "Contacts permission was denied; no contacts were read.");
+            processToolCall(assistantMessage, calls, index + 1);
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("Allow contact search?")
+                .setMessage("Mobile Agent needs contacts access to find matching names. "
+                        + "Names and phone numbers will be displayed only on this device and "
+                        + "will not be sent to DeepSeek. You can deny access.")
+                .setNegativeButton("Cancel", (dialog, which) -> contactPermissionDenied.run())
+                .setPositiveButton("Continue", (dialog, which) -> requestPermissions(
+                        new String[]{android.Manifest.permission.READ_CONTACTS}, REQUEST_CONTACTS))
+                .setOnCancelListener(dialog -> contactPermissionDenied.run())
+                .show();
+    }
+
+    private void executeApprovedContactSearch(String callId, JSONObject assistantMessage,
+                                              JSONArray calls, int index, JSONObject arguments) {
+        IO_EXECUTOR.execute(() -> {
+            String localResults = executeLocalTool("search_contacts", arguments);
+            String toolResult = AgentTools.contactSearchToolResult(localResults);
+            runOnUiThread(() -> {
+                if (localResults.startsWith("Contact matches (")) {
+                    addMessage("assistant", "Contact search results (shown only on this device):\n"
+                            + localResults);
+                }
+                appendToolResult(callId, toolResult);
+                processToolCall(assistantMessage, calls, index + 1);
+            });
+        });
+    }
+
     private void showToolApproval(String name, JSONObject arguments,
                                   ApprovalCallback callback) {
         String title;
@@ -467,9 +689,24 @@ public class MainActivity extends Activity {
         try {
             switch (name) {
                 case "create_file":
-                    title = "Create this file?";
-                    details = "Workspace path: " + arguments.getString("path")
+                case "write_file":
+                    title = "Write or replace this file?";
+                    details = "Path: " + displayToolPath(arguments)
                             + "\n\nContents:\n" + arguments.getString("content");
+                    break;
+                case "read_file":
+                    title = "Read this file?";
+                    details = "Path: " + displayToolPath(arguments)
+                            + "\n\nThe file contents will be returned to DeepSeek as tool output.";
+                    break;
+                case "list_directory":
+                    title = "List this directory?";
+                    details = "Path: " + displayToolPath(arguments)
+                            + "\n\nThe listing will be returned to DeepSeek as tool output.";
+                    break;
+                case "create_directory":
+                    title = "Create this directory?";
+                    details = "Path: " + arguments.getString("path");
                     break;
                 case "run_command":
                     JSONArray args = arguments.getJSONArray("args");
@@ -479,8 +716,30 @@ public class MainActivity extends Activity {
                         command.add(args.getString(i));
                     }
                     title = "Run this command?";
-                    details = "Runs inside the private workspace. Allowed commands are pwd, ls, cat, and wc.\n\n"
-                            + new JSONArray(command);
+                    details = "Working directory: /storage/emulated/0/mobileagent"
+                            + "\nOnly pwd, ls, cat, and wc are supported; no root or arbitrary shell."
+                            + "\nExact command and arguments:\n" + new JSONArray(command)
+                            + "\n\nCaptured output will be returned to DeepSeek as tool output.";
+                    break;
+                case "launch_intent":
+                    title = "Launch this Android action?";
+                    details = "Exact intent fields:\n" + arguments.toString(2)
+                            + "\n\nNo intent is dispatched unless you tap Allow. Review all "
+                            + "recipients and extras; an external app may perform an action "
+                            + "that cannot be undone here. Launch does not confirm completion.";
+                    break;
+                case "prepare_message":
+                    title = "Prepare this message?";
+                    details = "Channel: " + arguments.getString("channel")
+                            + "\nRecipient: " + arguments.getString("recipient")
+                            + "\n\nMessage:\n" + arguments.getString("body")
+                            + "\n\nThe messaging app will show a draft; it will not be sent automatically.";
+                    break;
+                case "search_contacts":
+                    title = "Search device contacts?";
+                    details = "Name query: " + arguments.getString("name")
+                            + "\n\nMatching names and phone numbers will be displayed only "
+                            + "on this device and will not be sent to DeepSeek.";
                     break;
                 default:
                     title = "Open calendar with this event?";
@@ -540,19 +799,126 @@ public class MainActivity extends Activity {
 
     private String executeLocalTool(String name, JSONObject arguments) {
         try {
-            if ("create_file".equals(name)) {
-                return AgentTools.createFile(workspaceDirectory(), arguments.getString("path"),
-                        arguments.getString("content"));
+            if ("search_contacts".equals(name)) {
+                return searchContacts(arguments.getString("name"));
+            }
+            File root = sharedStorageRoot();
+            String path = arguments.optString("path", "");
+            File workspace = "run_command".equals(name)
+                    ? workspaceDirectory() : AgentTools.workspaceForPath(root, path);
+            if ("create_file".equals(name) || "write_file".equals(name)) {
+                return AgentTools.writeTextFile(root, workspace, path, arguments.getString("content"));
+            }
+            if ("read_file".equals(name)) {
+                return AgentTools.readTextFile(root, workspace, path);
+            }
+            if ("list_directory".equals(name)) {
+                return AgentTools.listDirectory(root, workspace, path);
+            }
+            if ("create_directory".equals(name)) {
+                return AgentTools.createDirectory(root, workspace, arguments.getString("path"));
             }
             JSONArray suppliedArgs = arguments.getJSONArray("args");
             List<String> args = new ArrayList<>();
             for (int i = 0; i < suppliedArgs.length(); i++) {
                 args.add(suppliedArgs.getString(i));
             }
-            return AgentTools.runCommand(workspaceDirectory(), getCacheDir(),
+            return AgentTools.runCommand(workspace, getCacheDir(),
                     arguments.getString("command"), args);
         } catch (Exception exception) {
             return "Action failed: " + safeError(exception.getMessage());
+        }
+    }
+
+    private String searchContacts(String name) {
+        String query = name.trim();
+        if (query.isEmpty()) {
+            return "No contact search performed: provide a name.";
+        }
+        StringBuilder matches = new StringBuilder();
+        int count = 0;
+        boolean truncated = false;
+        try (Cursor cursor = getContentResolver().query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                new String[]{ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER},
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?",
+                new String[]{"%" + query + "%"},
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC")) {
+            if (cursor == null) {
+                return "Contacts provider returned no results.";
+            }
+            while (cursor.moveToNext()) {
+                if (count == 20) {
+                    truncated = true;
+                    break;
+                }
+                if (matches.length() > 0) {
+                    matches.append('\n');
+                }
+                matches.append("Name: ").append(cursor.getString(0))
+                        .append("\nPhone: ").append(cursor.getString(1));
+                count++;
+            }
+            if (count == 0) {
+                return "No contacts matched that name.";
+            }
+            if (truncated) {
+                matches.append("\nAdditional matches omitted (20-result limit).");
+            }
+            return "Contact matches (" + count + "):\n" + matches
+                    + "\nAsk the user to select the intended person before preparing a message.";
+        } catch (SecurityException exception) {
+            return "Contacts permission is unavailable; no contacts were read.";
+        }
+    }
+
+    private String executeMessageTool(JSONObject arguments) {
+        try {
+            String channel = arguments.getString("channel").trim()
+                    .toLowerCase(java.util.Locale.ROOT);
+            String recipient = arguments.getString("recipient").trim();
+            String body = arguments.getString("body");
+            if (recipient.isEmpty() || !recipient.matches("[+0-9(). -]{1,40}")
+                    || body.trim().isEmpty() || body.length() > 2000) {
+                return "Message not prepared: recipient and body are required (body limit 2,000 characters).";
+            }
+            Intent intent;
+            if ("sms".equals(channel)) {
+                intent = new Intent(Intent.ACTION_SENDTO,
+                        Uri.fromParts("smsto", recipient, null));
+                intent.putExtra("sms_body", body);
+            } else if ("whatsapp".equals(channel)) {
+                String digits = recipient.replaceAll("[^0-9]", "");
+                if (digits.isEmpty()) {
+                    return "Message not prepared: recipient has no phone-number digits.";
+                }
+                String packageName = installedPackage("com.whatsapp")
+                        ? "com.whatsapp" : installedPackage("com.whatsapp.w4b")
+                        ? "com.whatsapp.w4b" : null;
+                if (packageName == null) {
+                    return "WhatsApp is not installed.";
+                }
+                Uri uri = Uri.parse("https://wa.me/" + digits + "?text=" + Uri.encode(body));
+                intent = new Intent(Intent.ACTION_VIEW, uri).setPackage(packageName);
+            } else {
+                return "Unsupported message channel. Use sms or whatsapp.";
+            }
+            startActivity(intent);
+            return "Opened a message draft in the selected application. It has not been sent.";
+        } catch (ActivityNotFoundException exception) {
+            return "No installed application can prepare this message.";
+        } catch (Exception exception) {
+            return "Message preparation failed: " + safeError(exception.getMessage());
+        }
+    }
+
+    private boolean installedPackage(String packageName) {
+        try {
+            getPackageManager().getPackageInfo(packageName, 0);
+            return true;
+        } catch (Exception exception) {
+            return false;
         }
     }
 
@@ -577,9 +943,97 @@ public class MainActivity extends Activity {
 
     private File workspaceDirectory() {
         try {
-            return AgentTools.workspaceDirectory(getFilesDir());
+            return AgentTools.workspaceDirectory(sharedStorageRoot());
         } catch (IOException exception) {
             throw new IllegalStateException(exception);
+        }
+    }
+
+    private File sharedStorageRoot() {
+        return Environment.getExternalStorageDirectory();
+    }
+
+    private String displayToolPath(JSONObject arguments) {
+        String path = arguments.optString("path", "");
+        return path.trim().isEmpty() ? "/storage/emulated/0/mobileagent" : path;
+    }
+
+    private boolean requiresSharedStorage(String name) {
+        return "create_file".equals(name) || "read_file".equals(name)
+                || "write_file".equals(name) || "list_directory".equals(name)
+                || "create_directory".equals(name) || "run_command".equals(name);
+    }
+
+    private boolean hasSharedStorageAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        }
+        return checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void openSharedStorageSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Intent settingsIntent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            try {
+                startActivityForResult(settingsIntent, REQUEST_STORAGE_ACCESS);
+            } catch (ActivityNotFoundException exception) {
+                startActivityForResult(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+                        REQUEST_STORAGE_ACCESS);
+            }
+        } else {
+            requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    REQUEST_LEGACY_STORAGE);
+        }
+    }
+
+    private String executeIntentTool(JSONObject arguments) {
+        try {
+            JSONArray suppliedKeys = arguments.names();
+            List<String> allowedKeys = java.util.Arrays.asList(
+                    "action", "data", "mime_type", "package_name", "extras");
+            for (int i = 0; suppliedKeys != null && i < suppliedKeys.length(); i++) {
+                if (!allowedKeys.contains(suppliedKeys.getString(i))) {
+                    return "Intent rejected: it contains an unsupported field.";
+                }
+            }
+            String action = arguments.getString("action").trim();
+            if (action.isEmpty()) {
+                return "Intent rejected: action is required.";
+            }
+            Intent intent = new Intent(action);
+            String data = arguments.optString("data", "");
+            String mimeType = arguments.optString("mime_type", "");
+            if (!data.isEmpty() && !mimeType.isEmpty()) {
+                intent.setDataAndType(Uri.parse(data), mimeType);
+            } else if (!data.isEmpty()) {
+                intent.setData(Uri.parse(data));
+            } else if (!mimeType.isEmpty()) {
+                intent.setType(mimeType);
+            }
+            String packageName = arguments.optString("package_name", "");
+            if (!packageName.isEmpty()) {
+                intent.setPackage(packageName);
+            }
+            JSONObject extras = arguments.optJSONObject("extras");
+            if (extras != null) {
+                JSONArray keys = extras.names();
+                for (int i = 0; keys != null && i < keys.length(); i++) {
+                    String key = keys.getString(i);
+                    Object value = extras.get(key);
+                    if (!(value instanceof String)) {
+                        return "Intent rejected: extras must contain text values only.";
+                    }
+                    intent.putExtra(key, (String) value);
+                }
+            }
+            startActivity(intent);
+            return "Android accepted the intent launch. The external action's outcome is unknown.";
+        } catch (ActivityNotFoundException exception) {
+            return "No eligible application can handle this intent.";
+        } catch (Exception exception) {
+            return "Intent failed: " + safeError(exception.getMessage());
         }
     }
 
@@ -587,18 +1041,41 @@ public class MainActivity extends Activity {
         JSONArray tools = new JSONArray();
         tools.put(tool("get_current_datetime", "Get the current local date, time, and timezone.",
                 new JSONObject(), new JSONArray()));
-        tools.put(tool("create_file", "Create or replace a small text file in the private workspace.",
+        tools.put(tool("create_file", "Legacy alias: create or replace a UTF-8 text file at a device path accessible to this app, after approval.",
                 new JSONObject()
-                        .put("path", stringSchema("Relative workspace path, for example notes/todo.txt."))
+                        .put("path", stringSchema("Optional path: relative paths use the agent workspace; an absolute path may target any location Android permits."))
                         .put("content", stringSchema("Complete UTF-8 file contents, at most 16 KiB.")),
                 new JSONArray().put("path").put("content")));
-        tools.put(tool("run_command", "Run one allowlisted, read-only command in the private workspace. "
-                        + "Only pwd, ls, cat, and wc are supported; this is not a shell.",
+        tools.put(tool("read_file", "Read a UTF-8 text file at a device path Android permits. Omitted path defaults to /storage/emulated/0/mobileagent. The exact path is shown for approval, and contents are returned to DeepSeek.",
+                new JSONObject().put("path", stringSchema("Optional path: relative paths use the agent workspace; an absolute path may target any location Android permits.")),
+                new JSONArray()));
+        tools.put(tool("write_file", "Create or replace a UTF-8 text file at a device path Android permits, after approval. Omitted path defaults to the agent workspace.",
                 new JSONObject()
-                        .put("command", stringSchema("One of pwd, ls, cat, or wc."))
+                        .put("path", stringSchema("Optional path: relative paths use the agent workspace; an absolute path may target any location Android permits."))
+                        .put("content", stringSchema("Complete UTF-8 contents, at most 16 KiB.")),
+                new JSONArray().put("content")));
+        tools.put(tool("list_directory", "List an actual directory at a device path Android permits. Omitted path defaults to the agent workspace.",
+                new JSONObject().put("path", stringSchema("Optional path: relative paths use the agent workspace; an absolute path may target any location Android permits.")),
+                new JSONArray()));
+        tools.put(tool("create_directory", "Create a directory at a device path Android permits, after approval.",
+                new JSONObject().put("path", stringSchema("Relative to the agent workspace, or an absolute path Android permits.")),
+                new JSONArray().put("path")));
+        tools.put(tool("search_contacts", "Find contacts by part of the name after user approval and Android contacts permission. Results are displayed locally only and are not sent to DeepSeek; ask the user to choose from the on-device results.",
+                new JSONObject().put("name", stringSchema("Name or part of a name to search for.")),
+                new JSONArray().put("name")));
+        tools.put(tool("prepare_message", "Prepare an SMS or WhatsApp draft after approval; the external app retains the final Send action.",
+                new JSONObject()
+                        .put("channel", stringSchema("sms or whatsapp."))
+                        .put("recipient", stringSchema("Selected recipient phone number."))
+                        .put("body", stringSchema("Message text, at most 2,000 characters.")),
+                new JSONArray().put("channel").put("recipient").put("body")));
+        tools.put(tool("run_command", "Run a read-only command in the agent workspace. "
+                        + "Unsupported commands or excessive arguments produce an in-chat warning and are not run.",
+                new JSONObject()
+                        .put("command", stringSchema("Supported commands: pwd, ls, cat, and wc."))
                         .put("args", new JSONObject().put("type", "array")
                                 .put("items", stringSchema("Workspace-relative path when required."))
-                                .put("maxItems", 1)),
+                                .put("maxItems", 16)),
                 new JSONArray().put("command").put("args")));
         tools.put(tool("open_calendar", "Open the calendar app with a proposed event after user approval.",
                 new JSONObject()
@@ -606,6 +1083,15 @@ public class MainActivity extends Activity {
                         .put("start", stringSchema("Start timestamp in ISO-8601 UTC format."))
                         .put("end", stringSchema("End timestamp in ISO-8601 UTC format.")),
                 new JSONArray().put("title").put("start").put("end")));
+        JSONObject intentProperties = new JSONObject()
+                .put("action", stringSchema("Android intent action, for example android.intent.action.VIEW."))
+                .put("data", stringSchema("Optional data URI."))
+                .put("mime_type", stringSchema("Optional MIME type."))
+                .put("package_name", stringSchema("Optional target package."))
+                .put("extras", new JSONObject().put("type", "object")
+                        .put("additionalProperties", stringSchema("Text extra value.")));
+        tools.put(tool("launch_intent", "Create and launch an Android activity intent after approval. Only activity launches are supported; Android enforces app visibility and permissions. External completion is not inferred.",
+                intentProperties, new JSONArray().put("action")));
         return tools;
     }
 
@@ -637,7 +1123,10 @@ public class MainActivity extends Activity {
                 + ZonedDateTime.now() + ". Use this for relative dates and times, and use only the provided tools "
                 + "when an action is needed. Never claim an action happened before the tool result. "
                 + "All actions require explicit user approval; the app enforces this. Commands are "
-                + "limited to pwd, ls, cat, and wc in the app-private workspace, not a general shell.";
+                + "limited to pwd, ls, cat, and wc in the user-visible /storage/emulated/0/mobileagent workspace, not a general shell. "
+                + AgentTools.agentFilesPromptInstruction() + " "
+                + "Contact-search names and phone numbers are displayed locally and are not sent to DeepSeek; ask the user to select from the on-device results and submit the chosen recipient details before preparing a message. "
+                + "A messaging app draft is not a sent message, and an intent launch does not prove external completion.";
     }
 
     private void appendToolResult(String callId, String content) {
@@ -689,7 +1178,11 @@ public class MainActivity extends Activity {
 
     private boolean isSupportedTool(String name) {
         return "create_file".equals(name) || "run_command".equals(name)
-                || "open_calendar".equals(name) || "get_current_datetime".equals(name);
+                || "open_calendar".equals(name) || "get_current_datetime".equals(name)
+                || "read_file".equals(name) || "write_file".equals(name)
+                || "list_directory".equals(name) || "create_directory".equals(name)
+                || "launch_intent".equals(name) || "search_contacts".equals(name)
+                || "prepare_message".equals(name);
     }
 
     private String safeError(String value) {
@@ -700,7 +1193,7 @@ public class MainActivity extends Activity {
     }
 
     private void showToast(String value) {
-        Toast.makeText(this, value, Toast.LENGTH_LONG).show();
+        addMessage("assistant", value);
     }
 
     private TextView text(String value, int sizeSp, int color, boolean bold) {

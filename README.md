@@ -1,15 +1,18 @@
 # Mobile Agent
 
-A native Android prototype for a user-controlled, local-first assistant. This first version demonstrates a key safety rule: the app shows an explicit confirmation before launching an Android action.
+A native Android assistant prototype powered by DeepSeek. It can propose a small set of local tools and requires explicit approval before every action.
 
-## Current prototype
+## Features and safety limits
 
-- Presents a sample calendar-event proposal.
-- Requires confirmation before handing the event to a calendar app.
-- Leaves the final save decision to the calendar app.
-- Uses no calendar permission and does not connect to an AI model, read contacts, or run shell commands.
+- Connects to the DeepSeek chat completions API using the `deepseek-chat` model.
+- Enter your DeepSeek API key in the app. It is held in memory only and cleared when the app closes; it is not saved in the project or preferences.
+- Can propose creating a UTF-8 text file in its private workspace (`files/workspace`), limited to 16 KiB.
+- Can propose the read-only commands `pwd`, `ls`, `cat`, and `wc` inside that workspace. This is intentionally not an unrestricted shell; no shell expansion or arbitrary commands are allowed.
+- Can propose opening the calendar app with an event. The calendar app handles the final save.
+- Shows the proposed path and full file contents, command, or event details and asks before each tool call. Canceling a prompt does not execute that action.
+- Does not request calendar or contacts permissions. Chat messages are sent to DeepSeek to generate replies and tool proposals.
 
-The sample event is intentionally static; this is a starting point for the agent and tool architecture, not a connected AI assistant.
+Keep your API key private. This prototype does not provide production-grade key management, conversation persistence, or unrestricted terminal access.
 
 ## Build
 

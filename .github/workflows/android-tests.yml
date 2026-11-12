@@ -1,5 +1,8 @@
 name: Android tests
 
+permissions:
+  contents: read
+
 on:
   push:
   pull_request:
@@ -29,3 +32,13 @@ jobs:
 
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-agent-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

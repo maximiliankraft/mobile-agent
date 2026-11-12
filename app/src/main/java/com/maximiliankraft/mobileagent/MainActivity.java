@@ -263,23 +263,24 @@ public class MainActivity extends Activity {
             return;
         }
         showToolApproval(name, arguments, approved -> {
-            if (!approved) {
-                appendToolResult(callId, "User declined this action; nothing was changed.");
-                processToolCall(assistantMessage, calls, index + 1);
-                return;
-            }
-            if ("open_calendar".equals(name)) {
-                appendToolResult(callId, executeCalendarTool(arguments));
-                processToolCall(assistantMessage, calls, index + 1);
-                return;
-            }
-            IO_EXECUTOR.execute(() -> {
-                String result = executeLocalTool(name, arguments);
-                runOnUiThread(() -> {
-                    appendToolResult(callId, result);
+            boolean started = AgentTools.runApprovedAction(approved, () -> {
+                if ("open_calendar".equals(name)) {
+                    appendToolResult(callId, executeCalendarTool(arguments));
                     processToolCall(assistantMessage, calls, index + 1);
+                    return;
+                }
+                IO_EXECUTOR.execute(() -> {
+                    String result = executeLocalTool(name, arguments);
+                    runOnUiThread(() -> {
+                        appendToolResult(callId, result);
+                        processToolCall(assistantMessage, calls, index + 1);
+                    });
                 });
             });
+            if (!started) {
+                appendToolResult(callId, "User declined this action; nothing was changed.");
+                processToolCall(assistantMessage, calls, index + 1);
+            }
         });
     }
 

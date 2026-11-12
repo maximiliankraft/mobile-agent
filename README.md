@@ -23,3 +23,13 @@ Open the project in Android Studio, or build it from the repository root with:
 ```
 
 The app requires Android 8.0 (API 26) or later.
+
+## Tests and CI
+
+Run the local JVM unit tests with:
+
+```shell
+./gradlew testDebugUnitTest
+```
+
+GitHub Actions runs the unit tests on pushes and pull requests. After they pass, it builds the debug APK and publishes it as the `mobile-agent-debug-apk` workflow artifact.

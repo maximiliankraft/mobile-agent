@@ -6,10 +6,12 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -76,6 +78,8 @@ public class AgentToolsTest {
                 "cat", Collections.singletonList("hello.txt"));
         String wcResult = AgentTools.runCommand(workspace, cacheDirectory,
                 "wc", Collections.singletonList("hello.txt"));
+        String lsResult = AgentTools.runCommand(workspace, cacheDirectory,
+                "ls", Collections.emptyList());
         String pwdResult = AgentTools.runCommand(workspace, cacheDirectory, "pwd",
                 Collections.emptyList());
         String rejectedResult = AgentTools.runCommand(workspace, cacheDirectory, "sh",
@@ -83,6 +87,7 @@ public class AgentToolsTest {
 
         assertTrue(catResult.contains(content.trim()));
         assertTrue(wcResult.startsWith("Exit code 0:"));
+        assertTrue(lsResult.contains("hello.txt"));
         assertTrue(pwdResult.contains(workspace.getCanonicalPath()));
         assertTrue(rejectedResult.contains("only pwd, ls, cat, and wc are allowed"));
         assertFalse(new File(workspace, "should-not-exist").exists());
@@ -90,10 +95,44 @@ public class AgentToolsTest {
 
     @Test
     public void rejectsCommandPathsThatEscapeWorkspace() throws Exception {
-        String result = AgentTools.runCommand(workspace, cacheDirectory,
-                "cat", Collections.singletonList("../outside.txt"));
+        try {
+            AgentTools.runCommand(workspace, cacheDirectory,
+                    "cat", Collections.singletonList("../outside.txt"));
+            fail("Expected the command path to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("Path must stay inside the private workspace"));
+        }
+    }
 
-        assertTrue(result.contains("Path must stay inside the private workspace"));
+    @Test
+    public void rejectsCommandOutputForFilesOverTheLimit() throws Exception {
+        Files.write(new File(workspace, "large.txt").toPath(),
+                repeat('a', AgentTools.MAX_COMMAND_OUTPUT_BYTES + 1).getBytes(StandardCharsets.UTF_8));
+
+        String result = AgentTools.runCommand(workspace, cacheDirectory,
+                "cat", Collections.singletonList("large.txt"));
+
+        assertTrue(result.contains("file must exist and be at most 8 KiB"));
+    }
+
+    @Test
+    public void actionsDoNotRunWithoutApproval() {
+        AtomicBoolean actionRan = new AtomicBoolean(false);
+
+        boolean started = AgentTools.runApprovedAction(false, () -> actionRan.set(true));
+
+        assertFalse(started);
+        assertFalse(actionRan.get());
+    }
+
+    @Test
+    public void approvedActionsRun() {
+        AtomicBoolean actionRan = new AtomicBoolean(false);
+
+        boolean started = AgentTools.runApprovedAction(true, () -> actionRan.set(true));
+
+        assertTrue(started);
+        assertTrue(actionRan.get());
     }
 
     @Test

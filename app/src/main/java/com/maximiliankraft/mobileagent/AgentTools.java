@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -111,12 +112,26 @@ final class AgentTools {
 
     static CalendarEvent validateCalendarEvent(String title, String start, String end) {
         String normalizedTitle = title.trim();
-        long startMillis = Instant.parse(start).toEpochMilli();
-        long endMillis = Instant.parse(end).toEpochMilli();
+        long startMillis;
+        long endMillis;
+        try {
+            startMillis = Instant.parse(start).toEpochMilli();
+            endMillis = Instant.parse(end).toEpochMilli();
+        } catch (DateTimeException exception) {
+            throw new IllegalArgumentException("Event times must use ISO-8601 UTC format.", exception);
+        }
         if (normalizedTitle.isEmpty() || normalizedTitle.length() > 120 || endMillis <= startMillis) {
             throw new IllegalArgumentException("Check the title and event times.");
         }
         return new CalendarEvent(normalizedTitle, startMillis, endMillis);
+    }
+
+    static boolean runApprovedAction(boolean approved, Runnable action) {
+        if (!approved) {
+            return false;
+        }
+        action.run();
+        return true;
     }
 
     private static String readLimited(File file, int maximumCharacters) throws IOException {

@@ -64,6 +64,7 @@ public class MainActivity extends Activity {
     private EditText messageInput;
     private ScrollView messageScroll;
     private Button sendButton;
+    private TextView attachmentStatus;
     private String apiKey;
     private String pendingImageDataUrl;
     private String pendingContext = "";
@@ -123,7 +124,7 @@ public class MainActivity extends Activity {
         messages.setPadding(dp(14), dp(14), dp(14), dp(14));
         messageScroll.addView(messages);
         addMessage("assistant",
-                "Add your DeepSeek API key, then ask me to create a file, run a safe read-only command, or draft a calendar event. I will show the exact action and ask before doing it.");
+                "Ask me to create a file, run a safe read-only command, or draft a calendar event. I will show each action and ask before doing it.");
 
         LinearLayout attachmentActions = new LinearLayout(this);
         attachmentActions.setGravity(Gravity.CENTER_VERTICAL);
@@ -134,6 +135,14 @@ public class MainActivity extends Activity {
         attachmentActions.addView(fileButton);
         attachmentActions.addView(contactButton);
         page.addView(attachmentActions);
+        attachmentStatus = text("", 12, MUTED, false);
+        page.addView(attachmentStatus);
+        Button clearAttachments = attachmentButton("Clear selected items", () -> {
+            pendingImageDataUrl = null;
+            pendingContext = "";
+            updateAttachmentStatus();
+        });
+        page.addView(clearAttachments);
 
         LinearLayout composer = new LinearLayout(this);
         composer.setGravity(Gravity.CENTER_VERTICAL);
@@ -182,6 +191,7 @@ public class MainActivity extends Activity {
         }
         pendingImageDataUrl = null;
         pendingContext = "";
+        updateAttachmentStatus();
         busy = true;
         apiTurnsRemaining = MAX_API_TURNS;
         setComposerEnabled(false);
@@ -209,7 +219,8 @@ public class MainActivity extends Activity {
     }
 
     private void chooseContact() {
-        Intent intent = new Intent(Intent.ACTION_PICK, ContactsContract.Contacts.CONTENT_URI);
+        Intent intent = new Intent(Intent.ACTION_PICK,
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI);
         try {
             startActivityForResult(intent, PICK_CONTACT);
         } catch (ActivityNotFoundException exception) {
@@ -238,20 +249,43 @@ public class MainActivity extends Activity {
                 byte[] imageBytes = readUriBytes(uri, MAX_ATTACHMENT_BYTES);
                 pendingImageDataUrl = "data:" + mimeType + ";base64,"
                         + Base64.encodeToString(imageBytes, Base64.NO_WRAP);
+                updateAttachmentStatus();
                 showToast("Image attached. Add a prompt and send it.");
             } else if (requestCode == PICK_FILE) {
                 String fileText = new String(readUriBytes(uri, MAX_TEXT_FILE_BYTES),
                         StandardCharsets.UTF_8);
                 pendingContext += "\nSelected text file (" + uri.getLastPathSegment()
                         + "):\n" + fileText;
+                updateAttachmentStatus();
                 showToast("File attached to the next prompt.");
             } else if (requestCode == PICK_CONTACT) {
                 pendingContext += "\nSelected contact:\n" + readContact(uri);
+                updateAttachmentStatus();
                 showToast("Contact added to the next prompt.");
             }
         } catch (Exception exception) {
             showToast("Could not read the selection: " + safeError(exception.getMessage()));
         }
+    }
+
+    private void updateAttachmentStatus() {
+        if (attachmentStatus == null) {
+            return;
+        }
+        StringBuilder status = new StringBuilder();
+        if (pendingImageDataUrl != null) {
+            status.append("Image selected");
+        }
+        if (!pendingContext.isEmpty()) {
+            if (status.length() > 0) {
+                status.append(" · ");
+            }
+            status.append("File/contact context selected");
+        }
+        if (status.length() > 0) {
+            status.append(" — sent with your next message");
+        }
+        attachmentStatus.setText(status.toString());
     }
 
     private byte[] readUriBytes(Uri uri, int maximumBytes) throws IOException {
@@ -273,42 +307,19 @@ public class MainActivity extends Activity {
     }
 
     private String readContact(Uri uri) {
-        StringBuilder result = new StringBuilder();
-        String contactId = null;
         try (Cursor cursor = getContentResolver().query(uri,
-                new String[]{ContactsContract.Contacts._ID,
-                        ContactsContract.Contacts.DISPLAY_NAME,
-                        ContactsContract.Contacts.HAS_PHONE_NUMBER},
+                new String[]{ContactsContract.Contacts.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER},
                 null, null, null)) {
             if (cursor == null || !cursor.moveToFirst()) {
                 return "No contact details were available.";
             }
-            contactId = cursor.getString(0);
-            result.append("Name: ").append(cursor.getString(1));
-            if (cursor.getInt(2) != 0) {
-                try (Cursor phones = getContentResolver().query(
-                        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                        new String[]{ContactsContract.CommonDataKinds.Phone.NUMBER},
-                        ContactsContract.CommonDataKinds.Phone.CONTACT_ID + " = ?",
-                        new String[]{contactId}, null)) {
-                    if (phones != null && phones.moveToFirst()) {
-                        result.append("\nPhone: ").append(phones.getString(0));
-                    }
-                }
-            }
+            int nameIndex = cursor.getColumnIndexOrThrow(ContactsContract.Contacts.DISPLAY_NAME);
+            int phoneIndex = cursor.getColumnIndexOrThrow(
+                    ContactsContract.CommonDataKinds.Phone.NUMBER);
+            return "Name: " + cursor.getString(nameIndex)
+                    + "\nPhone: " + cursor.getString(phoneIndex);
         }
-        if (contactId != null) {
-            try (Cursor emails = getContentResolver().query(
-                    ContactsContract.CommonDataKinds.Email.CONTENT_URI,
-                    new String[]{ContactsContract.CommonDataKinds.Email.ADDRESS},
-                    ContactsContract.CommonDataKinds.Email.CONTACT_ID + " = ?",
-                    new String[]{contactId}, null)) {
-                if (emails != null && emails.moveToFirst()) {
-                    result.append("\nEmail: ").append(emails.getString(0));
-                }
-            }
-        }
-        return result.toString();
     }
 
     private void requestAssistantResponse() {

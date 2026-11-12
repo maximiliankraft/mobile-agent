@@ -141,6 +141,7 @@ public class AgentToolsTest {
         assertTrue(instruction.contains("skills/"));
         assertTrue(instruction.contains("read_file"));
         assertTrue(instruction.contains("not loaded automatically"));
+        assertTrue(instruction.contains("before stating an action is unsupported"));
     }
 
     @Test

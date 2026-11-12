@@ -54,6 +54,9 @@ final class AgentTools {
         return "The user-visible agent workspace may contain user.md, soul.md, and a skills/ "
                 + "directory. These files are not loaded automatically. When relevant, use "
                 + "list_directory and read_file to inspect and read only what is needed. "
+                + "before stating an action is unsupported, inspect relevant skills/ and "
+                + "consider all available tools, including launch_intent when appropriate. "
+                + "Do not claim a workflow is impossible only because there is no dedicated tool. "
                 + "File reads require user approval, and their contents are sent to DeepSeek.";
     }
 

@@ -32,4 +32,4 @@ Run the local JVM unit tests with:
 ./gradlew testDebugUnitTest
 ```
 
-GitHub Actions runs the unit tests on pushes and pull requests. After they pass, it builds the debug APK and publishes it as the `mobile-agent-debug-apk` workflow artifact.
+GitHub Actions runs the unit tests on pushes and pull requests. After they pass, it builds the debug APK and publishes it as the `mobile-agent-debug-apk` workflow artifact. Download it from the workflow run's Artifacts section.

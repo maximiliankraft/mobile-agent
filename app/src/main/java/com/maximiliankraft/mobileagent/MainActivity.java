@@ -25,8 +25,6 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.InputStream;
@@ -34,12 +32,10 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
     private static final int PAGE_BACKGROUND = Color.rgb(246, 247, 249);
@@ -48,8 +44,6 @@ public class MainActivity extends Activity {
     private static final int ACCENT = Color.rgb(54, 91, 214);
     private static final String API_URL = "https://api.deepseek.com/chat/completions";
     private static final String MODEL = "deepseek-chat";
-    private static final int MAX_FILE_BYTES = 16 * 1024;
-    private static final int MAX_COMMAND_OUTPUT_BYTES = 8 * 1024;
     private static final int MAX_API_TURNS = 8;
     private static final int MAX_TOOL_CALLS_PER_RESPONSE = 4;
     private static final ExecutorService IO_EXECUTOR = Executors.newSingleThreadExecutor();
@@ -338,97 +332,31 @@ public class MainActivity extends Activity {
     private String executeLocalTool(String name, JSONObject arguments) {
         try {
             if ("create_file".equals(name)) {
-                String path = arguments.getString("path");
-                String content = arguments.getString("content");
-                byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
-                if (bytes.length > MAX_FILE_BYTES) {
-                    return "File not created: content exceeds 16 KiB.";
-                }
-                File target = workspaceFile(path);
-                File parent = target.getParentFile();
-                if (parent == null || (!parent.exists() && !parent.mkdirs())) {
-                    return "File not created: could not create its parent directory.";
-                }
-                Files.write(target.toPath(), bytes);
-                return "Created " + path + " (" + bytes.length + " bytes) in the private workspace.";
+                return AgentTools.createFile(workspaceDirectory(), arguments.getString("path"),
+                        arguments.getString("content"));
             }
-            return runSafeCommand(arguments);
+            JSONArray suppliedArgs = arguments.getJSONArray("args");
+            List<String> args = new ArrayList<>();
+            for (int i = 0; i < suppliedArgs.length(); i++) {
+                args.add(suppliedArgs.getString(i));
+            }
+            return AgentTools.runCommand(workspaceDirectory(), getCacheDir(),
+                    arguments.getString("command"), args);
         } catch (Exception exception) {
             return "Action failed: " + safeError(exception.getMessage());
         }
     }
 
-    private String runSafeCommand(JSONObject arguments) throws Exception {
-        String name = arguments.getString("command");
-        JSONArray suppliedArgs = arguments.getJSONArray("args");
-        if (suppliedArgs.length() > 2) {
-            return "Command rejected: at most two arguments are allowed.";
-        }
-        List<String> command = new ArrayList<>();
-        command.add(name);
-        switch (name) {
-            case "pwd":
-                if (suppliedArgs.length() != 0) {
-                    return "Command rejected: pwd takes no arguments.";
-                }
-                break;
-            case "ls":
-                if (suppliedArgs.length() > 1) {
-                    return "Command rejected: ls accepts one workspace path.";
-                }
-                if (suppliedArgs.length() == 1) {
-                    command.add(workspaceFile(suppliedArgs.getString(0)).getPath());
-                } else {
-                    command.add(".");
-                }
-                break;
-            case "cat":
-            case "wc":
-                if (suppliedArgs.length() != 1) {
-                    return "Command rejected: " + name + " requires one workspace file path.";
-                }
-                File target = workspaceFile(suppliedArgs.getString(0));
-                if (!target.isFile() || target.length() > MAX_COMMAND_OUTPUT_BYTES) {
-                    return "Command rejected: file must exist and be at most 8 KiB.";
-                }
-                command.add(target.getPath());
-                break;
-            default:
-                return "Command rejected: only pwd, ls, cat, and wc are allowed.";
-        }
-        ProcessBuilder builder = new ProcessBuilder(command)
-                .directory(workspaceDirectory())
-                .redirectErrorStream(true);
-        File output = File.createTempFile("agent-command-", ".txt", getCacheDir());
-        try {
-            builder.redirectOutput(output);
-            Process process = builder.start();
-            if (!process.waitFor(5, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
-                return "Command stopped after the 5-second time limit.";
-            }
-            String result = readLimited(output, MAX_COMMAND_OUTPUT_BYTES);
-            return "Exit code " + process.exitValue() + ":\n" + result;
-        } finally {
-            if (!output.delete()) {
-                output.deleteOnExit();
-            }
-        }
-    }
-
     private String executeCalendarTool(JSONObject arguments) {
         try {
-            String title = arguments.getString("title").trim();
-            long start = java.time.Instant.parse(arguments.getString("start")).toEpochMilli();
-            long end = java.time.Instant.parse(arguments.getString("end")).toEpochMilli();
-            if (title.isEmpty() || title.length() > 120 || end <= start) {
-                return "Calendar action rejected: check the title and event times.";
-            }
+            AgentTools.CalendarEvent event = AgentTools.validateCalendarEvent(
+                    arguments.getString("title"), arguments.getString("start"),
+                    arguments.getString("end"));
             Intent intent = new Intent(Intent.ACTION_INSERT)
                     .setData(CalendarContract.Events.CONTENT_URI)
-                    .putExtra(CalendarContract.Events.TITLE, title)
-                    .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, start)
-                    .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, end);
+                    .putExtra(CalendarContract.Events.TITLE, event.title)
+                    .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, event.startMillis)
+                    .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, event.endMillis);
             startActivity(intent);
             return "Opened a calendar app with the event. The user must still save it there.";
         } catch (ActivityNotFoundException exception) {
@@ -439,41 +367,11 @@ public class MainActivity extends Activity {
     }
 
     private File workspaceDirectory() {
-        File directory = new File(getFilesDir(), "workspace");
-        if (!directory.exists()) {
-            directory.mkdirs();
+        try {
+            return AgentTools.workspaceDirectory(getFilesDir());
+        } catch (IOException exception) {
+            throw new IllegalStateException(exception);
         }
-        return directory;
-    }
-
-    private File workspaceFile(String relativePath) throws IOException {
-        if (relativePath.trim().isEmpty() || relativePath.length() > 240
-                || relativePath.startsWith("/") || relativePath.indexOf('\n') >= 0
-                || relativePath.indexOf('\r') >= 0) {
-            throw new IOException("Use a non-empty relative workspace path.");
-        }
-        File root = workspaceDirectory().getCanonicalFile();
-        File target = new File(root, relativePath).getCanonicalFile();
-        if (!target.toPath().startsWith(root.toPath()) || target.equals(root)) {
-            throw new IOException("Path must stay inside the private workspace.");
-        }
-        return target;
-    }
-
-    private String readLimited(File file, int maximumBytes) throws IOException {
-        StringBuilder value = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                new FileInputStream(file), StandardCharsets.UTF_8))) {
-            int character;
-            while ((character = reader.read()) != -1) {
-                if (value.length() >= maximumBytes) {
-                    value.append("\n…output truncated…");
-                    break;
-                }
-                value.append((char) character);
-            }
-        }
-        return value.toString();
     }
 
     private JSONArray toolDefinitions() throws JSONException {

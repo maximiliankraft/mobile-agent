@@ -1,0 +1,18 @@
+services:
+  android-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /workspace
+    volumes:
+      - ./dist:/output
+      - gradle-cache:/gradle-cache
+    command:
+      - sh
+      - -c
+      - >-
+        ./gradlew assembleRelease
+        && cp app/build/outputs/apk/release/*.apk /output/mobile-agent-release.apk
+
+volumes:
+  gradle-cache:

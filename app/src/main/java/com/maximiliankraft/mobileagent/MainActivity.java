@@ -2,6 +2,7 @@ package com.maximiliankraft.mobileagent;
 
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ContentResolver;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -289,6 +290,9 @@ public class MainActivity extends Activity {
     }
 
     private byte[] readUriBytes(Uri uri, int maximumBytes) throws IOException {
+        if (uri == null || !ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+            throw new IOException("Only content-provider files selected through Android are supported.");
+        }
         try (InputStream input = getContentResolver().openInputStream(uri);
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             if (input == null) {

@@ -30,10 +30,42 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Configure shared APK signing key
+        env:
+          MOBILE_AGENT_KEYSTORE_BASE64: ${{ secrets.MOBILE_AGENT_KEYSTORE_BASE64 }}
+          MOBILE_AGENT_KEYSTORE_PASSWORD: ${{ secrets.MOBILE_AGENT_KEYSTORE_PASSWORD }}
+          MOBILE_AGENT_KEY_ALIAS: ${{ secrets.MOBILE_AGENT_KEY_ALIAS }}
+          MOBILE_AGENT_KEY_PASSWORD: ${{ secrets.MOBILE_AGENT_KEY_PASSWORD }}
+        run: |
+          if [ -z "$MOBILE_AGENT_KEYSTORE_BASE64" ] \
+            && [ -z "$MOBILE_AGENT_KEYSTORE_PASSWORD" ] \
+            && [ -z "$MOBILE_AGENT_KEY_ALIAS" ] \
+            && [ -z "$MOBILE_AGENT_KEY_PASSWORD" ]; then
+            echo "::warning::Shared signing secrets are not configured; this debug APK will use the runner's temporary key."
+            exit 0
+          fi
+
+          if [ -z "$MOBILE_AGENT_KEYSTORE_BASE64" ] \
+            || [ -z "$MOBILE_AGENT_KEYSTORE_PASSWORD" ] \
+            || [ -z "$MOBILE_AGENT_KEY_ALIAS" ] \
+            || [ -z "$MOBILE_AGENT_KEY_PASSWORD" ]; then
+            echo "::error::All four shared signing secrets must be configured together."
+            exit 1
+          fi
+
+          keystore="$RUNNER_TEMP/mobile-agent-signing.jks"
+          printf '%s' "$MOBILE_AGENT_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          echo "MOBILE_AGENT_KEYSTORE_FILE=$keystore" >> "$GITHUB_ENV"
+
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
 
       - name: Build debug APK
+        env:
+          MOBILE_AGENT_KEYSTORE_PASSWORD: ${{ secrets.MOBILE_AGENT_KEYSTORE_PASSWORD }}
+          MOBILE_AGENT_KEY_ALIAS: ${{ secrets.MOBILE_AGENT_KEY_ALIAS }}
+          MOBILE_AGENT_KEY_PASSWORD: ${{ secrets.MOBILE_AGENT_KEY_PASSWORD }}
         run: ./gradlew assembleDebug
 
       - name: Upload debug APK

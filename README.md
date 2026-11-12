@@ -27,6 +27,19 @@ Open the project in Android Studio, or build it from the repository root with:
 
 The app requires Android 8.0 (API 26) or later.
 
+### Keep local and CI APK signatures the same
+
+For update installs, `app/build.gradle.kts` uses one shared keystore for both debug and release builds when `signing.properties` is present. Keep the keystore at `.signing/mobile-agent.jks`; both it and `signing.properties` are gitignored. The same values can be supplied through the `MOBILE_AGENT_KEYSTORE_FILE`, `MOBILE_AGENT_KEYSTORE_PASSWORD`, `MOBILE_AGENT_KEY_ALIAS`, and `MOBILE_AGENT_KEY_PASSWORD` environment variables.
+
+To make GitHub Actions sign its debug APK with this key, add these repository Actions secrets:
+
+- `MOBILE_AGENT_KEYSTORE_BASE64`: one-line Base64 output of `.signing/mobile-agent.jks` (for example, `base64 -w0 .signing/mobile-agent.jks`).
+- `MOBILE_AGENT_KEYSTORE_PASSWORD`: the `storePassword` value from local `signing.properties`.
+- `MOBILE_AGENT_KEY_ALIAS`: the `keyAlias` value from local `signing.properties`.
+- `MOBILE_AGENT_KEY_PASSWORD`: the `keyPassword` value from local `signing.properties`.
+
+If none of these secrets are set, CI still builds but its APK uses a temporary runner key and cannot update an install signed with the local key. Configure all four together. Back up the keystore and its passwords securely; losing them prevents future update installs signed with that key.
+
 ## Tests and CI
 
 Run the local JVM unit tests with:

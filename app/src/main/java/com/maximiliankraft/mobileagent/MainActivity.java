@@ -8,6 +8,7 @@ import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -21,10 +22,12 @@ import android.net.Uri;
 import android.util.Base64;
 import android.view.inputmethod.EditorInfo;
 import android.view.Gravity;
+import android.view.WindowInsets;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -72,6 +75,7 @@ public class MainActivity extends Activity {
     private final List<JSONObject> conversation = new ArrayList<>();
     private final List<String> pendingAttachmentLabels = new ArrayList<>();
     private LinearLayout messages;
+    private LinearLayout loadingIndicator;
     private EditText messageInput;
     private ScrollView messageScroll;
     private Button sendButton;
@@ -96,7 +100,11 @@ public class MainActivity extends Activity {
             return;
         }
         conversation.add(systemMessage());
-        setContentView(createContent());
+        LinearLayout content = createContent();
+        setContentView(content);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            content.requestApplyInsets();
+        }
     }
 
     @Override
@@ -109,6 +117,7 @@ public class MainActivity extends Activity {
         page.setOrientation(LinearLayout.VERTICAL);
         page.setPadding(dp(20), dp(20), dp(20), dp(16));
         page.setBackgroundColor(PAGE_BACKGROUND);
+        configureKeyboardInsets(page);
 
         LinearLayout titleRow = new LinearLayout(this);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -175,6 +184,11 @@ public class MainActivity extends Activity {
         messageInput.setMinLines(1);
         messageInput.setMaxLines(4);
         messageInput.setImeOptions(EditorInfo.IME_ACTION_SEND);
+        messageInput.setOnFocusChangeListener((view, hasFocus) -> {
+            if (hasFocus && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                page.requestApplyInsets();
+            }
+        });
         composer.addView(messageInput, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         sendButton = new Button(this);
@@ -184,6 +198,21 @@ public class MainActivity extends Activity {
         page.addView(composer);
         sendButton.setOnClickListener(view -> sendMessage());
         return page;
+    }
+
+    private void configureKeyboardInsets(LinearLayout page) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return;
+        }
+        getWindow().setDecorFitsSystemWindows(false);
+        page.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+            Insets systemBars = windowInsets.getInsets(WindowInsets.Type.systemBars());
+            Insets ime = windowInsets.getInsets(WindowInsets.Type.ime());
+            view.setPadding(dp(20) + systemBars.left, dp(20) + systemBars.top,
+                    dp(20) + systemBars.right,
+                    ChatInsets.bottomPadding(dp(16), systemBars.bottom, ime.bottom));
+            return windowInsets;
+        });
     }
 
     private void sendMessage() {
@@ -462,6 +491,7 @@ public class MainActivity extends Activity {
             finishAssistantTurn("Stopped after the tool-call limit. Send another message to continue.");
             return;
         }
+        showLoadingIndicator();
         IO_EXECUTOR.execute(() -> {
             try {
                 conversation.get(0).put("content", systemPrompt());
@@ -521,6 +551,7 @@ public class MainActivity extends Activity {
     }
 
     private void handleAssistantResponse(JSONObject assistantMessage) {
+        hideLoadingIndicator();
         conversation.add(assistantMessage);
         JSONArray toolCalls = assistantMessage.optJSONArray("tool_calls");
         if (toolCalls != null && toolCalls.length() > 0) {
@@ -1142,6 +1173,7 @@ public class MainActivity extends Activity {
     }
 
     private void finishAssistantTurn(String response) {
+        hideLoadingIndicator();
         if (response != null && !response.isEmpty()) {
             addMessage("assistant", response);
         }
@@ -1153,6 +1185,45 @@ public class MainActivity extends Activity {
         sendButton.setEnabled(enabled);
         messageInput.setEnabled(enabled);
         sendButton.setAlpha(enabled ? 1f : 0.55f);
+    }
+
+    private void showLoadingIndicator() {
+        if (loadingIndicator == null) {
+            loadingIndicator = new LinearLayout(this);
+            loadingIndicator.setGravity(Gravity.CENTER_VERTICAL);
+            loadingIndicator.setPadding(dp(12), dp(10), dp(12), dp(10));
+            loadingIndicator.setBackground(cardBackground(Color.WHITE, dp(12)));
+            loadingIndicator.setContentDescription("Generating a response");
+
+            ProgressBar spinner = new ProgressBar(this, null,
+                    android.R.attr.progressBarStyleSmall);
+            spinner.setIndeterminate(true);
+            spinner.setContentDescription("Generating");
+            loadingIndicator.addView(spinner,
+                    new LinearLayout.LayoutParams(dp(20), dp(20)));
+
+            TextView status = text("Generating response…", 14, MUTED, false);
+            LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            statusParams.leftMargin = dp(10);
+            loadingIndicator.addView(status, statusParams);
+        }
+        if (loadingIndicator.getParent() != messages) {
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            params.setMargins(0, 0, 0, dp(10));
+            messages.addView(loadingIndicator, params);
+        } else if (messages.indexOfChild(loadingIndicator) != messages.getChildCount() - 1) {
+            messages.removeView(loadingIndicator);
+            messages.addView(loadingIndicator);
+        }
+        messageScroll.post(() -> messageScroll.fullScroll(ScrollView.FOCUS_DOWN));
+    }
+
+    private void hideLoadingIndicator() {
+        if (loadingIndicator != null && loadingIndicator.getParent() == messages) {
+            messages.removeView(loadingIndicator);
+        }
     }
 
     private void addMessage(String role, String value) {

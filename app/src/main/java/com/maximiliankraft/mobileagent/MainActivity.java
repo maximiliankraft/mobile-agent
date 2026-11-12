@@ -25,10 +25,11 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileReader;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -308,7 +309,7 @@ public class MainActivity extends Activity {
                     }
                     title = "Run this command?";
                     details = "Runs inside the private workspace. Allowed commands are pwd, ls, cat, and wc.\n\n"
-                            + joinCommand(command);
+                            + new JSONArray(command);
                     break;
                 default:
                     title = "Open calendar with this event?";
@@ -446,7 +447,9 @@ public class MainActivity extends Activity {
     }
 
     private File workspaceFile(String relativePath) throws IOException {
-        if (relativePath.trim().isEmpty() || relativePath.startsWith("/")) {
+        if (relativePath.trim().isEmpty() || relativePath.length() > 240
+                || relativePath.startsWith("/") || relativePath.indexOf('\n') >= 0
+                || relativePath.indexOf('\r') >= 0) {
             throw new IOException("Use a non-empty relative workspace path.");
         }
         File root = workspaceDirectory().getCanonicalFile();
@@ -459,7 +462,8 @@ public class MainActivity extends Activity {
 
     private String readLimited(File file, int maximumBytes) throws IOException {
         StringBuilder value = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new FileReader(file, StandardCharsets.UTF_8))) {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(file), StandardCharsets.UTF_8))) {
             int character;
             while ((character = reader.read()) != -1) {
                 if (value.length() >= maximumBytes) {
@@ -572,17 +576,6 @@ public class MainActivity extends Activity {
     private boolean isSupportedTool(String name) {
         return "create_file".equals(name) || "run_command".equals(name)
                 || "open_calendar".equals(name);
-    }
-
-    private String joinCommand(List<String> values) {
-        StringBuilder result = new StringBuilder();
-        for (String value : values) {
-            if (result.length() > 0) {
-                result.append(' ');
-            }
-            result.append(value);
-        }
-        return result.toString();
     }
 
     private String safeError(String value) {

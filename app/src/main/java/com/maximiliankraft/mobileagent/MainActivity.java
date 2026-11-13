@@ -129,6 +129,30 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (pendingEditableFile != null && pendingEditableUri != null) {
+            outState.putString("pending_editable_path", pendingEditableFile.getAbsolutePath());
+            outState.putString("pending_editable_uri", pendingEditableUri.toString());
+            outState.putLong("pending_editable_length", pendingEditableFileLength);
+            outState.putLong("pending_editable_modified", pendingEditableFileLastModified);
+        }
+    }
+
+    @Override
+    protected void onRestoreInstanceState(Bundle savedInstanceState) {
+        super.onRestoreInstanceState(savedInstanceState);
+        String path = savedInstanceState.getString("pending_editable_path");
+        String uri = savedInstanceState.getString("pending_editable_uri");
+        if (path != null && uri != null) {
+            pendingEditableFile = new File(path);
+            pendingEditableUri = Uri.parse(uri);
+            pendingEditableFileLength = savedInstanceState.getLong("pending_editable_length");
+            pendingEditableFileLastModified = savedInstanceState.getLong("pending_editable_modified");
+        }
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         verifyEditableFileReturn();

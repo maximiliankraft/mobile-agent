@@ -117,8 +117,10 @@ public class AgentToolsTest {
         } catch (IOException expected) {
             assertTrue(expected.getMessage().contains("readable file"));
         }
+        File directory = new File(workspace, "directory");
+        Files.createDirectory(directory.toPath());
         try {
-            AgentTools.resolveReadableFile(workspace, "");
+            AgentTools.resolveReadableFile(workspace, "directory");
             fail("Expected a directory to be rejected.");
         } catch (IOException expected) {
             assertTrue(expected.getMessage().contains("readable file"));

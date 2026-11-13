@@ -45,6 +45,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -87,6 +88,10 @@ public class MainActivity extends Activity {
     private TextView attachmentStatus;
     private TextView loadingStatus;
     private String apiKey;
+    private File pendingEditableFile;
+    private Uri pendingEditableUri;
+    private long pendingEditableFileLength;
+    private long pendingEditableFileLastModified;
     private String pendingImageDataUrl;
     private File pendingCameraFile;
     private Uri pendingCameraUri;
@@ -100,10 +105,14 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        apiKey = ((MobileAgentApplication) getApplication()).getApiKey();
+        try {
+            apiKey = ((MobileAgentApplication) getApplication()).getApiKey();
+        } catch (GeneralSecurityException | IOException exception) {
+            openApiKeySettings();
+            return;
+        }
         if (apiKey == null || apiKey.isEmpty()) {
-            startActivity(new Intent(this, SettingsActivity.class));
-            finish();
+            openApiKeySettings();
             return;
         }
         conversation.add(systemMessage());
@@ -111,6 +120,65 @@ public class MainActivity extends Activity {
         setContentView(content);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             content.requestApplyInsets();
+        }
+    }
+
+    private void openApiKeySettings() {
+        startActivity(new Intent(this, SettingsActivity.class));
+        finish();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (pendingEditableFile != null && pendingEditableUri != null) {
+            outState.putString("pending_editable_path", pendingEditableFile.getAbsolutePath());
+            outState.putString("pending_editable_uri", pendingEditableUri.toString());
+            outState.putLong("pending_editable_length", pendingEditableFileLength);
+            outState.putLong("pending_editable_modified", pendingEditableFileLastModified);
+        }
+    }
+
+    @Override
+    protected void onRestoreInstanceState(Bundle savedInstanceState) {
+        super.onRestoreInstanceState(savedInstanceState);
+        String path = savedInstanceState.getString("pending_editable_path");
+        String uri = savedInstanceState.getString("pending_editable_uri");
+        if (path != null && uri != null) {
+            pendingEditableFile = new File(path);
+            pendingEditableUri = Uri.parse(uri);
+            pendingEditableFileLength = savedInstanceState.getLong("pending_editable_length");
+            pendingEditableFileLastModified = savedInstanceState.getLong("pending_editable_modified");
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        verifyEditableFileReturn();
+    }
+
+    private void verifyEditableFileReturn() {
+        if (pendingEditableFile == null) {
+            return;
+        }
+        File file = pendingEditableFile;
+        Uri uri = pendingEditableUri;
+        pendingEditableFile = null;
+        pendingEditableUri = null;
+        if (uri != null) {
+            revokeUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        }
+        if (!file.isFile() || !file.canRead()) {
+            addMessage("assistant", "Could not verify the workspace file after the editor closed. Use read_file to check its current state.");
+            return;
+        }
+        if (file.length() != pendingEditableFileLength
+                || file.lastModified() != pendingEditableFileLastModified) {
+            addMessage("assistant", "The workspace file's size or timestamp changed while the editor was open. Use read_file to confirm the current contents before discussing the edits.");
+        } else {
+            addMessage("assistant", "No workspace file size or timestamp change was detected after leaving the editor. Changes may not have been written back; the editor may have saved elsewhere or no edits were made. Use read_file to verify.");
         }
     }
 
@@ -702,7 +770,14 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == EDIT_API_KEY) {
-            apiKey = ((MobileAgentApplication) getApplication()).getApiKey();
+            try {
+                apiKey = ((MobileAgentApplication) getApplication()).getApiKey();
+            } catch (GeneralSecurityException | IOException exception) {
+                apiKey = null;
+            }
+            if (apiKey == null || apiKey.isEmpty()) {
+                openApiKeySettings();
+            }
             return;
         }
         if (requestCode == REQUEST_STORAGE_ACCESS || requestCode == REQUEST_LEGACY_STORAGE) {
@@ -889,8 +964,15 @@ public class MainActivity extends Activity {
                         .getJSONObject(0).getJSONObject("message");
                 runOnUiThread(() -> handleAssistantResponse(assistantMessage));
             } catch (Exception exception) {
+                String errorMessage = "DeepSeek request failed: "
+                        + safeError(exception.getMessage());
+                if (exception instanceof DeepSeekHttpException
+                        && ((DeepSeekHttpException) exception).isAuthenticationFailure()) {
+                    errorMessage += "\nThe saved API key has not been removed. Tap the API key button above to replace it.";
+                }
+                String responseError = errorMessage;
                 runOnUiThread(() -> finishAssistantTurn(
-                        "DeepSeek request failed: " + safeError(exception.getMessage())));
+                        responseError));
             }
         });
     }
@@ -912,6 +994,9 @@ public class MainActivity extends Activity {
                 ? connection.getInputStream() : connection.getErrorStream();
         if (responseStream == null) {
             connection.disconnect();
+            if (status < 200 || status >= 300) {
+                throw new DeepSeekHttpException(status, "");
+            }
             throw new IOException("DeepSeek returned HTTP " + status + ".");
         }
         StringBuilder responseBody = new StringBuilder();
@@ -928,7 +1013,7 @@ public class MainActivity extends Activity {
             connection.disconnect();
         }
         if (status < 200 || status >= 300) {
-            throw new IOException("HTTP " + status + ": " + responseBody);
+            throw new DeepSeekHttpException(status, responseBody.toString());
         }
         return new JSONObject(responseBody.toString());
     }
@@ -1036,12 +1121,15 @@ public class MainActivity extends Activity {
             }
             boolean started = AgentTools.runApprovedAction(approved, () -> {
                 if ("open_calendar".equals(name) || "launch_intent".equals(name)
-                        || "open_file".equals(name) || "prepare_message".equals(name)) {
+                        || "open_file".equals(name) || "open_file_editable".equals(name)
+                        || "prepare_message".equals(name)) {
                     String result = "open_calendar".equals(name)
                             ? executeCalendarTool(arguments)
                             : "launch_intent".equals(name)
                             ? executeIntentTool(arguments)
                             : "open_file".equals(name) ? executeOpenFileTool(arguments)
+                            : "open_file_editable".equals(name)
+                            ? executeOpenFileEditableTool(arguments)
                             : executeMessageTool(arguments);
                     appendToolResult(callId, result);
                     processToolCall(assistantMessage, calls, index + 1);
@@ -1120,6 +1208,16 @@ public class MainActivity extends Activity {
                     details = "Path: " + displayToolPath(arguments)
                             + "\n\nThe selected app will receive read-only access to this file.";
                     break;
+                case "open_file_editable": {
+                    title = "Open this file for editing?";
+                    details = "Path: " + displayToolPath(arguments);
+                    String targetPackage = arguments.optString("package_name", "").trim();
+                    if (!targetPackage.isEmpty()) {
+                        details += "\nTarget app: " + targetPackage;
+                    }
+                    details += "\n\nThe selected app will receive read and write access to this single file in the user-visible shared workspace. Other apps with storage access may also be able to read it. Only edits written back through this content URI update the workspace copy.";
+                    break;
+                }
                 case "list_directory":
                     title = "List this directory?";
                     details = "Path: " + displayToolPath(arguments)
@@ -1383,7 +1481,7 @@ public class MainActivity extends Activity {
         return "create_file".equals(name) || "read_file".equals(name)
                 || "write_file".equals(name) || "list_directory".equals(name)
                 || "create_directory".equals(name) || "run_command".equals(name)
-                || "open_file".equals(name);
+                || "open_file".equals(name) || "open_file_editable".equals(name);
     }
 
     private boolean hasSharedStorageAccess() {
@@ -1485,6 +1583,59 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String executeOpenFileEditableTool(JSONObject arguments) {
+        try {
+            JSONArray suppliedKeys = arguments.names();
+            for (int i = 0; suppliedKeys != null && i < suppliedKeys.length(); i++) {
+                String key = suppliedKeys.getString(i);
+                if (!"path".equals(key) && !"package_name".equals(key)) {
+                    return "Editable file open rejected: it contains an unsupported field.";
+                }
+            }
+            if (arguments.has("package_name")
+                    && !(arguments.get("package_name") instanceof String)) {
+                return "Editable file open rejected: package_name must be text.";
+            }
+
+            String path = arguments.getString("path");
+            String packageName = arguments.optString("package_name", "").trim();
+            File workspace = workspaceDirectory();
+            File file = AgentTools.resolveEditableFile(workspace, path);
+            Uri uri = WorkspaceFileProvider.uriForFile(
+                    getPackageName() + ".workspace-files", workspace, file);
+            String mimeType = AgentTools.mimeTypeForFileName(file.getName());
+            Intent intent = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, mimeType)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.setClipData(ClipData.newRawUri("Mobile Agent editable file", uri));
+            if (!packageName.isEmpty()) {
+                intent.setPackage(packageName);
+            }
+
+            pendingEditableFile = file;
+            pendingEditableUri = uri;
+            pendingEditableFileLength = file.length();
+            pendingEditableFileLastModified = file.lastModified();
+            try {
+                startActivity(intent);
+            } catch (RuntimeException exception) {
+                pendingEditableFile = null;
+                pendingEditableUri = null;
+                revokeUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                throw exception;
+            }
+            return "Opened the workspace file with read/write access to this file only. "
+                    + "When you return, use read_file to verify the current workspace contents.";
+        } catch (ActivityNotFoundException exception) {
+            return "No installed application can edit this file type with the selected target.";
+        } catch (Exception exception) {
+            return "Editable file open failed: " + safeError(exception.getMessage());
+        }
+    }
+
     private JSONArray toolDefinitions() throws JSONException {
         JSONArray tools = new JSONArray();
         tools.put(tool("get_current_datetime", "Get the current local date, time, and timezone.",
@@ -1534,6 +1685,11 @@ public class MainActivity extends Activity {
         tools.put(tool("open_file", "Open a readable file from the agent workspace in its default Android app after user approval. The app receives read-only access.",
                 new JSONObject().put("path", stringSchema("Relative file path inside the agent workspace.")),
                 new JSONArray().put("path")));
+        tools.put(tool("open_file_editable", "Open a file from the agent workspace in an editor after explicit user approval. The selected app receives read/write access to that single file in shared storage. Edits are visible to read_file only if the editor writes back through the supplied URI; after returning, use read_file to verify the workspace copy.",
+                new JSONObject()
+                        .put("path", stringSchema("Relative or absolute path to a readable, writable file inside the agent workspace."))
+                        .put("package_name", stringSchema("Optional Android package name of the editor to open.")),
+                new JSONArray().put("path")));
         JSONObject intentProperties = new JSONObject()
                 .put("action", stringSchema("Android intent action, for example android.intent.action.VIEW."))
                 .put("data", stringSchema("Optional data URI."))
@@ -1577,7 +1733,8 @@ public class MainActivity extends Activity {
                 + "limited to pwd, ls, cat, and wc in the user-visible /storage/emulated/0/mobileagent workspace, not a general shell. "
                 + AgentTools.agentFilesPromptInstruction() + " "
                 + "Contact-search names and phone numbers are displayed locally and are not sent to DeepSeek; ask the user to select from the on-device results and submit the chosen recipient details before preparing a message. "
-                + "A messaging app draft is not a sent message, and an intent launch does not prove external completion.";
+                + "A messaging app draft is not a sent message, and an intent launch does not prove external completion. "
+                + "Editable handoff grants an external app access to one workspace file; after the user returns, use read_file to verify edits before discussing their contents.";
     }
 
     private void appendToolResult(String callId, String content) {
@@ -1680,7 +1837,21 @@ public class MainActivity extends Activity {
                 || "read_file".equals(name) || "write_file".equals(name)
                 || "list_directory".equals(name) || "create_directory".equals(name)
                 || "launch_intent".equals(name) || "search_contacts".equals(name)
-                || "prepare_message".equals(name) || "open_file".equals(name);
+                || "prepare_message".equals(name) || "open_file".equals(name)
+                || "open_file_editable".equals(name);
+    }
+
+    private static final class DeepSeekHttpException extends IOException {
+        private final int statusCode;
+
+        DeepSeekHttpException(int statusCode, String responseBody) {
+            super("HTTP " + statusCode + ": " + responseBody);
+            this.statusCode = statusCode;
+        }
+
+        boolean isAuthenticationFailure() {
+            return statusCode == 401 || statusCode == 403;
+        }
     }
 
     private String safeError(String value) {

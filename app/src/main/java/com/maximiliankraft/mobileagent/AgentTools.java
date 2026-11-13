@@ -110,6 +110,28 @@ final class AgentTools {
         return target;
     }
 
+    static File resolveEditableFile(File workspaceDirectory, String path) throws IOException {
+        String suppliedPath = path == null ? "" : path;
+        if (suppliedPath.trim().isEmpty() || suppliedPath.length() > 4096
+                || suppliedPath.indexOf('\n') >= 0 || suppliedPath.indexOf('\r') >= 0) {
+            throw new IOException("Use a valid workspace file path.");
+        }
+
+        File workspace = workspaceDirectory.getCanonicalFile();
+        File requested = new File(suppliedPath);
+        File target = requested.isAbsolute()
+                ? requested.getCanonicalFile()
+                : workspaceFile(workspace, suppliedPath);
+        if (!target.toPath().startsWith(workspace.toPath()) || target.equals(workspace)) {
+            throw new IOException("Editable files must stay inside the agent workspace.");
+        }
+        if (!target.isFile() || !target.canRead() || !target.canWrite()) {
+            throw new IOException("Path is not a readable, writable workspace file: "
+                    + target.getPath());
+        }
+        return target;
+    }
+
     static String mimeTypeForFileName(String fileName) {
         int extensionStart = fileName.lastIndexOf('.');
         if (extensionStart < 0 || extensionStart == fileName.length() - 1) {

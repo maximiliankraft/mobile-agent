@@ -132,6 +132,35 @@ public class AgentToolsTest {
     }
 
     @Test
+    public void editableFilesAcceptRelativeAndAbsolutePathsOnlyInsideWorkspace()
+            throws Exception {
+        File requested = new File(workspace, "notes.md");
+        Files.write(requested.toPath(), "notes".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(requested.getCanonicalFile(),
+                AgentTools.resolveEditableFile(workspace, "notes.md"));
+        assertEquals(requested.getCanonicalFile(),
+                AgentTools.resolveEditableFile(workspace, requested.getAbsolutePath()));
+
+        File outside = temporaryFolder.newFile("outside.md");
+        try {
+            AgentTools.resolveEditableFile(workspace, outside.getAbsolutePath());
+            fail("Expected an absolute path outside the workspace to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("inside the agent workspace"));
+        }
+
+        File outsideLink = new File(workspace, "outside-link.md");
+        Files.createSymbolicLink(outsideLink.toPath(), outside.toPath());
+        try {
+            AgentTools.resolveEditableFile(workspace, "outside-link.md");
+            fail("Expected a workspace symlink to an outside file to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("inside the agent workspace"));
+        }
+    }
+
+    @Test
     public void derivesMimeTypesForCommonWorkspaceOutputFiles() {
         assertEquals("text/x-vcard", AgentTools.mimeTypeForFileName("contact.VCF"));
         assertEquals("text/calendar", AgentTools.mimeTypeForFileName("event.ics"));

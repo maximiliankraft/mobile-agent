@@ -48,7 +48,7 @@ The application must not claim that a third-party app completed an action merely
 
 ### 3.1 Main user flow
 
-1. The user opens the application. If no in-memory DeepSeek API key is available, the application opens API settings.
+1. The user opens the application. If no saved DeepSeek API key can be decrypted, the application opens API settings; otherwise, it opens chat with the saved key.
 2. The user enters a key and opens chat. The application creates a conversation and submits user messages to DeepSeek.
 3. The user may select supported context (text file, image, contact) or capture a new image. The application shows what is queued for the next message.
 4. The model returns text and, where appropriate, a proposed local action.
@@ -66,9 +66,9 @@ Read-only model utilities that do not access or modify private user data may run
 
 ### FR-001: API key and provider configuration
 
-**Status: Existing behavior retained.** The application shall provide a settings screen for a DeepSeek API key and use the `deepseek-chat` model through the chat-completions endpoint. The key shall be held in application memory only and shall not be written to preferences or project files. If the process is recreated without the key, the user shall be asked to enter it again. The key field shall mask its contents.
+**Status: Implemented in source; device validation pending.** The application shall provide a settings screen for a DeepSeek API key and use the `deepseek-chat` model through the chat-completions endpoint. It shall encrypt the key with AES-GCM using an Android Keystore key and store only the ciphertext in app-private preferences. The saved key shall survive process/device restarts and app updates, and shall be removed on uninstall or when the user explicitly forgets it in settings. App data backup shall remain disabled.
 
-The application shall not send a chat request when the key is empty. It shall report connection, HTTP, or response errors to the user without claiming a successful model response.
+The key field shall be masked by default and offer a visibility toggle. The key shall not be stored in the shared workspace, included in logs, or passed in intent extras. The application shall not send a chat request when the key is empty. It shall report connection, HTTP, or response errors without claiming a successful model response; authentication errors shall preserve the saved key and offer the user a way to replace it.
 
 ### FR-002: Chat and model interaction
 
@@ -174,6 +174,14 @@ For a sequence of proposed actions, each action shall be independently reviewabl
 
 **Status: Existing in part; extended to new tools.** When a provider, picker, camera, contact query, file operation, command, or intent cannot complete, the application shall report the failure and shall not report success. It shall keep the user able to continue or retry where safe. If the application cannot determine whether an external action completed, it shall state that the outcome is unknown rather than retrying a potentially duplicative action automatically.
 
+### FR-015: Editable workspace-file handoff
+
+**Status: Implemented in source; device verification pending.** The application shall retain the existing read-only `open_file` behavior and provide a separate `open_file_editable` tool for an existing readable, writable file inside the canonical agent workspace. It shall accept a workspace-relative or absolute path, derive the MIME type from the filename, and launch `ACTION_VIEW` with an optional target package.
+
+Every editable handoff shall require explicit approval showing the target path and disclosing that the workspace is shared storage. After approval, the receiving app shall receive read and write URI grants for only the requested file. The provider shall refuse paths outside the workspace; the grant shall be revoked when the user returns to Mobile Agent. A clear error shall be reported if no eligible handler exists. On return, Mobile Agent shall check whether the workspace file's size or timestamp changed and warn when no change is detected. Any follow-up discussion of edited contents shall use a fresh, approval-gated `read_file` call; it shall not assume that an editor saved changes back to the workspace.
+
+**Evidence:** `MainActivity.java` (editable tool approval, dispatch, and return handling); `AgentTools.java` (canonical workspace path validation); `WorkspaceFileProvider.java` (scoped content URI access).
+
 ## 5. Information, privacy, and permissions
 
 ### 5.1 Data sent to the model
@@ -186,11 +194,13 @@ Conversation persistence is not required by the draft. The current prototype hol
 
 The default workspace is user-visible shared storage, not the current app-private `files/workspace`. Access to shared or otherwise restricted storage shall follow the Android permission and user-grant model appropriate to the device's API level. Contacts access shall be permission-gated. Camera use shall be permission-gated if the application itself accesses the camera; a delegated camera application retains its own permission flow.
 
+The DeepSeek API key shall be stored only as encrypted ciphertext in app-private preferences, with its AES key held by Android Keystore. Backup shall be disabled so the credential is not copied into cloud backups. The key shall never be stored in the shared workspace.
+
 Root is an optional device capability, not a permission the application can assume. An `su` request requires an explicit user-approved command and any root-manager approval. The application shall explain when the device or OS denies access.
 
 ### 5.3 Sensitive actions
 
-Reading, writing, or executing a command against an absolute path outside the default workspace is sensitive and requires a prompt that shows the exact path. Read and command approvals shall disclose when their output will be returned to DeepSeek. Intents that carry recipient, message, file, or other user data shall display those values before launch. The application shall use the least data needed for the action and shall not log API keys or full private file/contact contents as diagnostic output.
+Reading, writing, or executing a command against an absolute path outside the default workspace is sensitive and requires a prompt that shows the exact path. Editable file handoff is restricted to the workspace and requires a per-call prompt showing the path, the single-file read/write grant, and the shared-storage disclosure. Read and command approvals shall disclose when their output will be returned to DeepSeek. Intents that carry recipient, message, file, or other user data shall display those values before launch. The application shall use the least data needed for the action and shall not log API keys or full private file/contact contents as diagnostic output.
 
 ## 6. Non-functional requirements
 
@@ -222,7 +232,7 @@ These cases are acceptance criteria for the target FSD. Existing unit tests are 
 
 ### TC-001: API setup and chat
 
-Launch without an API key; verify settings is shown. Enter a key and submit a prompt; verify a request reaches the configured DeepSeek endpoint and the response appears. Close/restart the app process; verify the key is not restored from persistent app storage and settings is requested again. Simulate a failed request and verify a clear error with no false success.
+Launch without an API key; verify settings is shown. Enter a key and submit a prompt; verify a request reaches the configured DeepSeek endpoint and the response appears. Restart the process and device, then install an update over the existing installation; verify chat opens with the saved key without re-entry. Verify the key is absent from shared storage and app backups. Forget the key in settings and verify the next launch requests it again. Simulate an authentication failure and verify the provider error is shown, the saved key is not silently discarded, and settings offers replacement.
 
 ### TC-002: Keyboard-visible composer
 
@@ -268,14 +278,20 @@ Return multiple tool proposals. Verify each has an independent approval. Deny th
 
 Simulate an external application closing or returning an ambiguous result after an intent launch. Verify Mobile Agent reports that launch/result status accurately and does not automatically resubmit a potentially duplicative action.
 
+### TC-013: Editable file handoff
+
+Open an existing workspace `.md`, `.txt`, or `.vcf` file through `open_file_editable`; verify the approval shows the exact path, shared-storage disclosure, and optional target package. Verify the default `open_file` still grants read-only access. Approve an editable handoff and verify the receiving app gets read/write access to only that content URI, including `ACTION_VIEW`, MIME type, and `FLAG_ACTIVITY_NEW_TASK`. Edit and save through the URI, return to Mobile Agent, and verify a new approved `read_file` returns the updated contents. Verify no-change or copied-out edits are reported, paths outside the canonical workspace and workspace symlinks to outside files are rejected, and an unavailable handler produces a clear error.
+
 ## 8. Implementation gaps and open decisions
 
 ### 8.1 Known implementation gaps
 
 | Area | Target requirement | Current evidence | Status |
 |---|---|---|---|
+| API credentials | Persist API key securely across process/device restarts and app updates | Android Keystore AES-GCM key plus ciphertext in app-private preferences; backup disabled | Implemented in source; device validation pending; see [FR-001](#fr-001-api-key-and-provider-configuration) |
 | Shared workspace | `/storage/emulated/0/mobileagent` | Shared-storage workspace creation, file tools, and Agent files view | Implemented in source; device validation pending; see [FR-005](#fr-005-default-user-visible-workspace) |
 | General filesystem | Read/write/list at user-authorized locations | Approval-gated read/write/list/create-directory tools; absolute paths attempted; documented size bounds | Partial; Android access and device validation remain; see [FR-006](#fr-006-read-write-and-list-device-files) |
+| Editable handoff | Edit a workspace file in an external app and round-trip changes | Per-call approval, scoped read/write URI grant, return check, and fresh `read_file` workflow | Implemented in source; device validation pending; see [FR-015](#fr-015-editable-workspace-file-handoff) |
 | Commands | Arbitrary device command, optional approved `su` | Four read-only commands in the user-visible workspace | Gap; see [FR-007](#fr-007-run-local-device-commands) |
 | Intents | General Android intent execution | Approval-gated activity intents with supported action/data/type/package/text-extra fields, plus calendar and message-draft flows | Partial; remaining intent forms and device validation; see [FR-008](#fr-008-create-and-execute-android-intents) |
 | Contacts | Search all matching contacts and disambiguate | Approval-gated phone-contact search; up to 20 local-only matches; SMS/WhatsApp drafts | Partial; other channels and device validation; see [FR-009](#fr-009-search-contacts-and-prepare-a-message) |
@@ -331,6 +347,7 @@ Simulate an external application closing or returning an ambiguous result after 
 | [FR-012](#fr-012-explicit-action-approval) | Explicit action approval | [TC-005](#tc-005-path-containment-and-failed-writes), [TC-006](#tc-006-command-execution-and-root-handling), [TC-011](#tc-011-approval-and-action-sequencing) |
 | [FR-013](#fr-013-calendar-event-draft) | Calendar event draft | [TC-007](#tc-007-intent-dispatch) |
 | [FR-014](#fr-014-failure-reporting-and-recovery) | Failure reporting and recovery | [TC-001](#tc-001-api-setup-and-chat), [TC-008](#tc-008-contact-lookup-and-message-preparation), [TC-009](#tc-009-camera-capture), [TC-012](#tc-012-external-action-uncertainty) |
+| [FR-015](#fr-015-editable-workspace-file-handoff) | Editable workspace-file handoff | [TC-013](#tc-013-editable-file-handoff) |
 | [NFR-001](#nfr-001-platform-compatibility) | Platform compatibility | Device matrix for TC-002–TC-010 |
 | [NFR-002](#nfr-002-safety-and-user-control) | Safety and user control | [TC-005](#tc-005-path-containment-and-failed-writes), [TC-006](#tc-006-command-execution-and-root-handling), [TC-007](#tc-007-intent-dispatch), [TC-011](#tc-011-approval-and-action-sequencing) |
 | [NFR-003](#nfr-003-data-bounds-and-responsiveness) | Data bounds and responsiveness | [TC-001](#tc-001-api-setup-and-chat), [TC-003](#tc-003-attachment-selection-and-disclosure) |
@@ -344,9 +361,9 @@ This FSD was derived from the user-provided draft `fsd-draft.md` and checked aga
 - `README.md:3-16` — prototype purpose, current features and explicit safety/privacy limits.
 - `app/src/main/AndroidManifest.xml:1-22` — declared permissions, activities, and keyboard resize mode.
 - `app/build.gradle.kts:5-15` — Android SDK levels and app version.
-- `app/src/main/java/com/maximiliankraft/mobileagent/MainActivity.java:46-85` — startup and key requirement; `:130-310` — composer and attachments; `:329-405` — model API flow; `:407-576` — approval, local tools, and calendar; `:586-640` — model tool definitions and prompt.
-- `app/src/main/java/com/maximiliankraft/mobileagent/AgentTools.java:17-110` — private workspace, file creation, command allowlist and execution limits; `:113-135` — calendar validation and approval gate.
-- `app/src/main/java/com/maximiliankraft/mobileagent/SettingsActivity.java:33-71` and `MobileAgentApplication.java:5-15` — API key entry and in-memory storage.
+- `app/src/main/java/com/maximiliankraft/mobileagent/MainActivity.java` — startup and API flow; per-call action approval; read-only and editable file handoff.
+- `app/src/main/java/com/maximiliankraft/mobileagent/AgentTools.java` and `WorkspaceFileProvider.java` — workspace path validation and scoped file content URIs.
+- `app/src/main/java/com/maximiliankraft/mobileagent/ApiKeyStore.java`, `SettingsActivity.java`, and `MobileAgentApplication.java` — encrypted persistent key storage, settings controls, and process-local key use.
 - `app/src/test/java/com/maximiliankraft/mobileagent/AgentToolsTest.java:21-161` — current JVM unit-test coverage.
 - `.github/workflows/android-tests.yml:11-44` — CI unit-test and debug-APK build steps.
 

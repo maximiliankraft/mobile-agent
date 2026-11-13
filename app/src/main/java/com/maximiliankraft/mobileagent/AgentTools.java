@@ -11,6 +11,7 @@ import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 final class AgentTools {
     static final int MAX_FILE_BYTES = 16 * 1024;
@@ -55,7 +56,7 @@ final class AgentTools {
                 + "directory. These files are not loaded automatically. When relevant, use "
                 + "list_directory and read_file to inspect and read only what is needed. "
                 + "before stating an action is unsupported, inspect relevant skills/ and "
-                + "consider all available tools, including launch_intent when appropriate. "
+                + "consider all available tools, including open_file and launch_intent when appropriate. "
                 + "Do not claim a workflow is impossible only because there is no dedicated tool. "
                 + "File reads require user approval, and their contents are sent to DeepSeek.";
     }
@@ -99,6 +100,37 @@ final class AgentTools {
             throw new IOException("Relative paths must stay inside the agent workspace.");
         }
         return target;
+    }
+
+    static File resolveReadableFile(File workspaceDirectory, String path) throws IOException {
+        File target = workspaceFile(workspaceDirectory, path);
+        if (!target.isFile() || !target.canRead()) {
+            throw new IOException("Path is not a readable file: " + target.getPath());
+        }
+        return target;
+    }
+
+    static String mimeTypeForFileName(String fileName) {
+        int extensionStart = fileName.lastIndexOf('.');
+        if (extensionStart < 0 || extensionStart == fileName.length() - 1) {
+            return "application/octet-stream";
+        }
+        String extension = fileName.substring(extensionStart + 1).toLowerCase(Locale.ROOT);
+        switch (extension) {
+            case "vcf":
+                return "text/x-vcard";
+            case "ics":
+                return "text/calendar";
+            case "pdf":
+                return "application/pdf";
+            case "txt":
+                return "text/plain";
+            case "md":
+                return "text/markdown";
+            default:
+                String guessedType = java.net.URLConnection.guessContentTypeFromName(fileName);
+                return guessedType == null ? "application/octet-stream" : guessedType;
+        }
     }
 
     static String readTextFile(File sharedStorageRoot, File workspaceDirectory, String path)

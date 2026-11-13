@@ -105,6 +105,43 @@ public class AgentToolsTest {
     }
 
     @Test
+    public void resolvesOnlyReadableRegularFilesForOpening() throws Exception {
+        File requested = new File(workspace, "contact.vcf");
+        Files.write(requested.toPath(), "BEGIN:VCARD".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(requested.getCanonicalFile(),
+                AgentTools.resolveReadableFile(workspace, "contact.vcf"));
+        try {
+            AgentTools.resolveReadableFile(workspace, "missing.vcf");
+            fail("Expected a nonexistent file to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("readable file"));
+        }
+        try {
+            AgentTools.resolveReadableFile(workspace, "");
+            fail("Expected a directory to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("readable file"));
+        }
+        try {
+            AgentTools.resolveReadableFile(workspace, requested.getAbsolutePath());
+            fail("Expected an absolute path to be rejected.");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("relative workspace path"));
+        }
+    }
+
+    @Test
+    public void derivesMimeTypesForCommonWorkspaceOutputFiles() {
+        assertEquals("text/x-vcard", AgentTools.mimeTypeForFileName("contact.VCF"));
+        assertEquals("text/calendar", AgentTools.mimeTypeForFileName("event.ics"));
+        assertEquals("application/pdf", AgentTools.mimeTypeForFileName("report.pdf"));
+        assertEquals("text/plain", AgentTools.mimeTypeForFileName("notes.txt"));
+        assertEquals("text/markdown", AgentTools.mimeTypeForFileName("README.md"));
+        assertEquals("application/octet-stream", AgentTools.mimeTypeForFileName("unknown"));
+    }
+
+    @Test
     public void absoluteDevicePathsDoNotRequireCreatingTheDefaultWorkspace() throws Exception {
         File requested = temporaryFolder.newFile("device-file-without-workspace.txt");
         File rootWithoutWorkspace = temporaryFolder.newFolder("storage-without-workspace");
@@ -140,6 +177,7 @@ public class AgentToolsTest {
         assertTrue(instruction.contains("soul.md"));
         assertTrue(instruction.contains("skills/"));
         assertTrue(instruction.contains("read_file"));
+        assertTrue(instruction.contains("open_file"));
         assertTrue(instruction.contains("not loaded automatically"));
         assertTrue(instruction.contains("before stating an action is unsupported"));
     }

@@ -1036,11 +1036,13 @@ public class MainActivity extends Activity {
             }
             boolean started = AgentTools.runApprovedAction(approved, () -> {
                 if ("open_calendar".equals(name) || "launch_intent".equals(name)
-                        || "prepare_message".equals(name)) {
+                        || "open_file".equals(name) || "prepare_message".equals(name)) {
                     String result = "open_calendar".equals(name)
                             ? executeCalendarTool(arguments)
                             : "launch_intent".equals(name)
-                            ? executeIntentTool(arguments) : executeMessageTool(arguments);
+                            ? executeIntentTool(arguments)
+                            : "open_file".equals(name) ? executeOpenFileTool(arguments)
+                            : executeMessageTool(arguments);
                     appendToolResult(callId, result);
                     processToolCall(assistantMessage, calls, index + 1);
                     return;
@@ -1112,6 +1114,11 @@ public class MainActivity extends Activity {
                     title = "Read this file?";
                     details = "Path: " + displayToolPath(arguments)
                             + "\n\nThe file contents will be returned to DeepSeek as tool output.";
+                    break;
+                case "open_file":
+                    title = "Open this file?";
+                    details = "Path: " + displayToolPath(arguments)
+                            + "\n\nThe selected app will receive read-only access to this file.";
                     break;
                 case "list_directory":
                     title = "List this directory?";
@@ -1375,7 +1382,8 @@ public class MainActivity extends Activity {
     private boolean requiresSharedStorage(String name) {
         return "create_file".equals(name) || "read_file".equals(name)
                 || "write_file".equals(name) || "list_directory".equals(name)
-                || "create_directory".equals(name) || "run_command".equals(name);
+                || "create_directory".equals(name) || "run_command".equals(name)
+                || "open_file".equals(name);
     }
 
     private boolean hasSharedStorageAccess() {
@@ -1451,6 +1459,32 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String executeOpenFileTool(JSONObject arguments) {
+        try {
+            JSONArray suppliedKeys = arguments.names();
+            for (int i = 0; suppliedKeys != null && i < suppliedKeys.length(); i++) {
+                if (!"path".equals(suppliedKeys.getString(i))) {
+                    return "File open rejected: it contains an unsupported field.";
+                }
+            }
+            String path = arguments.getString("path");
+            File workspace = workspaceDirectory();
+            File file = AgentTools.resolveReadableFile(workspace, path);
+            Uri uri = WorkspaceFileProvider.uriForFile(
+                    getPackageName() + ".workspace-files", workspace, file);
+            String mimeType = AgentTools.mimeTypeForFileName(file.getName());
+            Intent intent = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, mimeType)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(intent);
+            return "Opened the file with a read-only content URI. The external action's outcome is unknown.";
+        } catch (ActivityNotFoundException exception) {
+            return "No installed application can open this file type.";
+        } catch (Exception exception) {
+            return "File open failed: " + safeError(exception.getMessage());
+        }
+    }
+
     private JSONArray toolDefinitions() throws JSONException {
         JSONArray tools = new JSONArray();
         tools.put(tool("get_current_datetime", "Get the current local date, time, and timezone.",
@@ -1497,6 +1531,9 @@ public class MainActivity extends Activity {
                         .put("start", stringSchema("Start timestamp in ISO-8601 UTC format."))
                         .put("end", stringSchema("End timestamp in ISO-8601 UTC format.")),
                 new JSONArray().put("title").put("start").put("end")));
+        tools.put(tool("open_file", "Open a readable file from the agent workspace in its default Android app after user approval. The app receives read-only access.",
+                new JSONObject().put("path", stringSchema("Relative file path inside the agent workspace.")),
+                new JSONArray().put("path")));
         JSONObject intentProperties = new JSONObject()
                 .put("action", stringSchema("Android intent action, for example android.intent.action.VIEW."))
                 .put("data", stringSchema("Optional data URI."))
@@ -1643,7 +1680,7 @@ public class MainActivity extends Activity {
                 || "read_file".equals(name) || "write_file".equals(name)
                 || "list_directory".equals(name) || "create_directory".equals(name)
                 || "launch_intent".equals(name) || "search_contacts".equals(name)
-                || "prepare_message".equals(name);
+                || "prepare_message".equals(name) || "open_file".equals(name);
     }
 
     private String safeError(String value) {

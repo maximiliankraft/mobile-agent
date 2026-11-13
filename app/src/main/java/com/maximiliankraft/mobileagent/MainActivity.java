@@ -1582,10 +1582,10 @@ public class MainActivity extends Activity {
             String mimeType = AgentTools.mimeTypeForFileName(file.getName());
             Intent intent = new Intent(Intent.ACTION_VIEW)
                     .setDataAndType(uri, mimeType)
-                    .setClipData(ClipData.newRawUri("Mobile Agent editable file", uri))
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                             | Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.setClipData(ClipData.newRawUri("Mobile Agent editable file", uri));
             if (!packageName.isEmpty()) {
                 intent.setPackage(packageName);
             }
